@@ -1,0 +1,24 @@
+node_modules/
+.DS_Store
+dist/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# uv
+uv.lock
+
+# Harness runtime
+.harness/harness.db
+.harness/current.md
+.harness/scripts/
+
+# Generated images
+*.png
+*.jpg
+*.jpeg
+*.webp

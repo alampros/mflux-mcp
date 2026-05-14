@@ -1,0 +1,103 @@
+[
+  {
+    "slug": "project-scaffold",
+    "title": "Project Scaffolding",
+    "description": "Create the initial Python project structure with pyproject.toml (uv), server.py stub, and tests/ directory. Set up dependencies (mflux, fastmcp, mcp) and dev dependencies (pytest, pytest-asyncio). Verify the project can be synced with uv and pytest runs with zero errors.",
+    "acceptance": [
+      "pyproject.toml exists with correct project metadata and all runtime + dev dependencies",
+      "server.py exists with a minimal FastMCP server that starts without errors",
+      "tests/ directory exists with conftest.py and at least one placeholder test",
+      "uv sync succeeds without errors",
+      "uv run pytest tests/ exits 0",
+      "uv run python server.py --help shows usage (or starts without crashing)"
+    ],
+    "status": "pending"
+  },
+  {
+    "slug": "model-cache",
+    "title": "Lazy Model Cache",
+    "description": "Implement a model cache module that lazily loads mflux models on first use and caches them in memory keyed by (model_name, quantize). This avoids the multi-second model load on every generation call. The cache should support all mflux model families and handle load errors gracefully.",
+    "acceptance": [
+      "A model cache exists that stores loaded models keyed by (model_name, quantize) tuple",
+      "First call for a given (model, quantize) loads the model; subsequent calls return the cached instance",
+      "Cache supports at minimum Flux2Klein, Flux2KleinEdit, ZImageTurbo model families",
+      "Model load errors are caught and returned as descriptive error messages, not unhandled exceptions",
+      "Unit tests verify cache hit/miss behavior using mocked model classes",
+      "Unit tests verify error handling when model load fails"
+    ],
+    "status": "pending"
+  },
+  {
+    "slug": "generate-image-tool",
+    "title": "generate_image MCP Tool",
+    "description": "Implement the generate_image MCP tool that performs text-to-image generation using the mflux Python API. The tool should accept prompt, model, width, height, steps, seed, and quantize parameters. It should use the lazy model cache, generate an image, and return it via the FastMCP Image type. Default to FLUX.2 klein-4b with q8 quantization.",
+    "acceptance": [
+      "generate_image tool is registered with FastMCP and appears in tool listing",
+      "Tool accepts parameters: prompt (required), model (optional, default flux2-klein-4b), width (optional, default 1024), height (optional, default 1024), steps (optional, default 4), seed (optional, random), quantize (optional, default 8)",
+      "Tool calls mflux Python API (not subprocess) to generate the image",
+      "Tool returns the generated image via FastMCP Image type (base64)",
+      "Missing prompt returns a clear validation error",
+      "Invalid model name returns a descriptive error",
+      "Unit tests verify parameter validation (missing prompt, invalid dimensions, invalid quantize values)",
+      "Unit tests verify happy path with mocked model returning a mock PIL Image"
+    ],
+    "status": "pending"
+  },
+  {
+    "slug": "edit-image-tool",
+    "title": "edit_image MCP Tool",
+    "description": "Implement the edit_image MCP tool for image-conditioned editing using FLUX.2's edit capability. The tool accepts image_paths, prompt, model, steps, and seed. It uses Flux2KleinEdit from the mflux Python API via the model cache.",
+    "acceptance": [
+      "edit_image tool is registered with FastMCP and appears in tool listing",
+      "Tool accepts parameters: image_paths (required, list of file paths), prompt (required), model (optional), steps (optional, default 4), seed (optional)",
+      "Tool validates that all image_paths exist on disk before attempting generation",
+      "Tool calls mflux Flux2KleinEdit Python API to perform the edit",
+      "Tool returns the edited image via FastMCP Image type (base64)",
+      "Missing image_paths or prompt returns a clear validation error",
+      "Non-existent file path returns a descriptive error",
+      "Unit tests verify parameter validation and happy path with mocked model"
+    ],
+    "status": "pending"
+  },
+  {
+    "slug": "list-models-tool",
+    "title": "list_models MCP Tool",
+    "description": "Implement the list_models MCP tool that returns a structured list of all available mflux model families, their variants, capabilities, and recommended settings.",
+    "acceptance": [
+      "list_models tool is registered with FastMCP and appears in tool listing",
+      "Tool returns a structured list including at minimum: FLUX.2, Z-Image, FIBO, FLUX.1, Qwen, SeedVR2",
+      "Each model entry includes: family name, variant names, description, supported features (edit, upscale, etc.), and recommended default steps",
+      "Unit test verifies the returned structure contains all expected model families"
+    ],
+    "status": "pending"
+  },
+  {
+    "slug": "get-metadata-tool",
+    "title": "get_image_metadata MCP Tool",
+    "description": "Implement the get_image_metadata MCP tool that reads and returns metadata embedded in mflux-generated images using mflux's MetadataReader.",
+    "acceptance": [
+      "get_image_metadata tool is registered with FastMCP and appears in tool listing",
+      "Tool accepts an image_path parameter (required)",
+      "Tool calls mflux MetadataReader.read_all_metadata to extract metadata",
+      "Tool returns the metadata as a structured dict/JSON",
+      "Non-existent file path returns a descriptive error",
+      "File with no mflux metadata returns an empty result or descriptive message, not an exception",
+      "Unit tests verify happy path and error cases"
+    ],
+    "status": "pending"
+  },
+  {
+    "slug": "transport-cli",
+    "title": "CLI Transport Options",
+    "description": "Add CLI argument parsing to server.py so it supports --transport (stdio or http) and --port flags. Default to stdio for local agent use. HTTP transport enables remote/networked usage.",
+    "acceptance": [
+      "server.py accepts --transport flag with values 'stdio' (default) and 'http'",
+      "server.py accepts --port flag (default 8000) for HTTP transport",
+      "Running 'uv run server.py' starts in stdio mode",
+      "Running 'uv run server.py --transport http --port 8080' starts an HTTP server on port 8080",
+      "Invalid transport value produces a clear error message",
+      "Unit test or health check verifies the server starts without errors in stdio mode"
+    ],
+    "status": "pending"
+  }
+]
