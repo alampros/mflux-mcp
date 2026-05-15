@@ -62,9 +62,46 @@ uv run server.py
 uv run server.py --transport http --port 8080
 ```
 
-### Claude Desktop integration
+### MCP client integration
 
-Add to your Claude Desktop MCP config (`claude_desktop_config.json`).
+#### OpenCode
+
+Add to your OpenCode config (`opencode.jsonc`):
+
+**Using uvx (zero-clone):**
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "mflux": {
+      "type": "local",
+      "command": ["uvx", "--from", "git+https://github.com/alampros/mflux-mcp.git", "mflux-mcp"]
+    }
+  }
+}
+```
+
+**Using a local clone:**
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "mflux": {
+      "type": "local",
+      "command": ["uv", "run", "server.py"],
+      "environment": {
+        "PATH": "/path/to/mflux-mcp"
+      }
+    }
+  }
+}
+```
+
+#### Claude Desktop
+
+Add to your Claude Desktop MCP config (`claude_desktop_config.json`):
 
 **Using uvx (zero-clone):**
 
