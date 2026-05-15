@@ -1,0 +1,19 @@
+[project]
+name = "mflux-mcp"
+version = "0.1.0"
+description = "MCP server exposing mflux image generation to LLM agents"
+requires-python = ">=3.12"
+dependencies = [
+    "mflux",
+    "fastmcp",
+    "mcp",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

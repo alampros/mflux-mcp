@@ -17,6 +17,16 @@
         "--port",
         "3742"
       ]
+    },
+    "mflux-mcp": {
+      "enabled": true,
+      "type": "local",
+      "command": [
+        "uv",
+        "run",
+        "python",
+        "server.py"
+      ]
     }
   }
 }
