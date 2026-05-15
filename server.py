@@ -268,10 +268,15 @@ def parse_args(argv: list[str] | None = None):
     return parser.parse_args(argv)
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for the mflux-mcp console script."""
     args = parse_args()
 
     kwargs: dict = {"transport": args.transport}
     if args.transport == "http":
         kwargs["port"] = args.port
     mcp.run(**kwargs)
+
+
+if __name__ == "__main__":
+    main()

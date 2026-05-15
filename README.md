@@ -18,6 +18,22 @@ No cloud API keys. No GPU servers. Just your Mac.
 
 ## Installation
 
+### Quick start (zero-clone)
+
+If you just want to use mflux-mcp as an MCP tool — no need to clone the repo:
+
+```bash
+uvx --from "git+https://github.com/alampros/mflux-mcp.git" mflux-mcp
+```
+
+This installs the server from git and runs it in one command. To pick up new versions after the repo is updated:
+
+```bash
+uv cache clean
+```
+
+### Local development setup
+
 ```bash
 # Clone the repo
 git clone git@github.com:alampros/mflux-mcp.git
@@ -48,7 +64,22 @@ uv run server.py --transport http --port 8080
 
 ### Claude Desktop integration
 
-Add to your Claude Desktop MCP config (`claude_desktop_config.json`):
+Add to your Claude Desktop MCP config (`claude_desktop_config.json`).
+
+**Using uvx (zero-clone):**
+
+```json
+{
+  "mcpServers": {
+    "mflux": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/alampros/mflux-mcp.git", "mflux-mcp"]
+    }
+  }
+}
+```
+
+**Using a local clone:**
 
 ```json
 {

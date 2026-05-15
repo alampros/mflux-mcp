@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "mflux-mcp"
 version = "0.1.0"
@@ -9,11 +13,17 @@ dependencies = [
     "mcp",
 ]
 
+[project.scripts]
+mflux-mcp = "server:main"
+
 [dependency-groups]
 dev = [
     "pytest",
     "pytest-asyncio",
 ]
+
+[tool.setuptools]
+py-modules = ["server", "mflux_cache"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
