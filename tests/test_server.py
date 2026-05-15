@@ -6,7 +6,7 @@ MLX models or performing actual GPU inference.
 
 import io
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import PIL.Image
 import pytest
@@ -86,11 +86,11 @@ class TestGenerateImageHappyPath:
         return mock_model, mock_generated
 
     @patch.object(cache, "get_model")
-    def test_returns_image_with_default_params(self, mock_get_model):
+    async def test_returns_image_with_default_params(self, mock_get_model):
         mock_model, _ = self._make_mock_model()
         mock_get_model.return_value = mock_model
 
-        result = generate_image(prompt="A red square")
+        result = await generate_image(prompt="A red square")
 
         assert result is not None
         # Result should be a FastMCP Image with PNG data
@@ -98,20 +98,20 @@ class TestGenerateImageHappyPath:
         assert len(result.data) > 0
 
     @patch.object(cache, "get_model")
-    def test_calls_cache_with_correct_model_and_quantize(self, mock_get_model):
+    async def test_calls_cache_with_correct_model_and_quantize(self, mock_get_model):
         mock_model, _ = self._make_mock_model()
         mock_get_model.return_value = mock_model
 
-        generate_image(prompt="test", model="schnell", quantize=4)
+        await generate_image(prompt="test", model="schnell", quantize=4)
 
         mock_get_model.assert_called_once_with("schnell", quantize=4, lora_style=None)
 
     @patch.object(cache, "get_model")
-    def test_passes_params_to_model_generate(self, mock_get_model):
+    async def test_passes_params_to_model_generate(self, mock_get_model):
         mock_model, _ = self._make_mock_model()
         mock_get_model.return_value = mock_model
 
-        generate_image(
+        await generate_image(
             prompt="A blue cat",
             width=512,
             height=768,
@@ -128,11 +128,11 @@ class TestGenerateImageHappyPath:
         )
 
     @patch.object(cache, "get_model")
-    def test_auto_generates_seed_when_none(self, mock_get_model):
+    async def test_auto_generates_seed_when_none(self, mock_get_model):
         mock_model, _ = self._make_mock_model()
         mock_get_model.return_value = mock_model
 
-        generate_image(prompt="test", seed=None)
+        await generate_image(prompt="test", seed=None)
 
         call_kwargs = mock_model.generate_image.call_args[1]
         seed = call_kwargs["seed"]
@@ -140,41 +140,41 @@ class TestGenerateImageHappyPath:
         assert 0 <= seed <= 2**32 - 1
 
     @patch.object(cache, "get_model")
-    def test_returned_data_is_valid_png(self, mock_get_model):
+    async def test_returned_data_is_valid_png(self, mock_get_model):
         mock_model, _ = self._make_mock_model()
         mock_get_model.return_value = mock_model
 
-        result = generate_image(prompt="test")
+        result = await generate_image(prompt="test")
 
         # PNG magic bytes: \x89PNG\r\n\x1a\n
         assert result.data[:4] == b"\x89PNG"
 
     @patch.object(cache, "get_model")
-    def test_returned_image_format_is_png(self, mock_get_model):
+    async def test_returned_image_format_is_png(self, mock_get_model):
         mock_model, _ = self._make_mock_model()
         mock_get_model.return_value = mock_model
 
-        result = generate_image(prompt="test")
+        result = await generate_image(prompt="test")
 
         assert result._format == "png"
 
     @patch.object(cache, "get_model")
-    def test_custom_dimensions_used(self, mock_get_model):
+    async def test_custom_dimensions_used(self, mock_get_model):
         mock_model, _ = self._make_mock_model()
         mock_get_model.return_value = mock_model
 
-        generate_image(prompt="test", width=256, height=384)
+        await generate_image(prompt="test", width=256, height=384)
 
         call_kwargs = mock_model.generate_image.call_args[1]
         assert call_kwargs["width"] == 256
         assert call_kwargs["height"] == 384
 
     @patch.object(cache, "get_model")
-    def test_explicit_seed_is_used(self, mock_get_model):
+    async def test_explicit_seed_is_used(self, mock_get_model):
         mock_model, _ = self._make_mock_model()
         mock_get_model.return_value = mock_model
 
-        generate_image(prompt="test", seed=12345)
+        await generate_image(prompt="test", seed=12345)
 
         call_kwargs = mock_model.generate_image.call_args[1]
         assert call_kwargs["seed"] == 12345
@@ -184,27 +184,27 @@ class TestGenerateImageErrors:
     """Tests for error handling in generate_image."""
 
     @patch.object(cache, "get_model")
-    def test_invalid_model_raises_value_error(self, mock_get_model):
+    async def test_invalid_model_raises_value_error(self, mock_get_model):
         mock_get_model.side_effect = ValueError("Unknown model: 'bad-model'")
 
         with pytest.raises(ValueError, match="Unknown model"):
-            generate_image(prompt="test", model="bad-model")
+            await generate_image(prompt="test", model="bad-model")
 
     @patch.object(cache, "get_model")
-    def test_model_load_failure_raises_runtime_error(self, mock_get_model):
+    async def test_model_load_failure_raises_runtime_error(self, mock_get_model):
         mock_get_model.side_effect = RuntimeError("Failed to load model")
 
         with pytest.raises(RuntimeError, match="Failed to load"):
-            generate_image(prompt="test")
+            await generate_image(prompt="test")
 
     @patch.object(cache, "get_model")
-    def test_generation_failure_propagates(self, mock_get_model):
+    async def test_generation_failure_propagates(self, mock_get_model):
         mock_model = MagicMock()
         mock_model.generate_image.side_effect = RuntimeError("MLX error")
         mock_get_model.return_value = mock_model
 
         with pytest.raises(RuntimeError, match="MLX error"):
-            generate_image(prompt="test")
+            await generate_image(prompt="test")
 
 
 # ---------------------------------------------------------------------------
@@ -260,22 +260,22 @@ class TestEditImageHappyPath:
         return mock_model, mock_generated
 
     @patch.object(cache, "get_model")
-    def test_returns_image_with_default_params(self, mock_get_model):
+    async def test_returns_image_with_default_params(self, mock_get_model):
         mock_model, _ = self._make_mock_model()
         mock_get_model.return_value = mock_model
 
-        result = edit_image(image_paths=["input.jpg"], prompt="Make it blue")
+        result = await edit_image(image_paths=["input.jpg"], prompt="Make it blue")
 
         assert result is not None
         assert result.data is not None
         assert len(result.data) > 0
 
     @patch.object(cache, "get_model")
-    def test_calls_cache_with_correct_model_and_quantize(self, mock_get_model):
+    async def test_calls_cache_with_correct_model_and_quantize(self, mock_get_model):
         mock_model, _ = self._make_mock_model()
         mock_get_model.return_value = mock_model
 
-        edit_image(
+        await edit_image(
             image_paths=["input.jpg"],
             prompt="test",
             model="fibo-edit",
@@ -285,12 +285,12 @@ class TestEditImageHappyPath:
         mock_get_model.assert_called_once_with("fibo-edit", quantize=4, lora_style=None)
 
     @patch.object(cache, "get_model")
-    def test_flux2_klein_edit_passes_image_paths_list(self, mock_get_model):
+    async def test_flux2_klein_edit_passes_image_paths_list(self, mock_get_model):
         """Flux2KleinEdit should receive image_paths (plural list)."""
         mock_model, _ = self._make_mock_model()
         mock_get_model.return_value = mock_model
 
-        edit_image(
+        await edit_image(
             image_paths=["person.jpg", "glasses.jpg"],
             prompt="Make the woman wear the eyeglasses",
             model="flux2-klein-edit",
@@ -306,12 +306,12 @@ class TestEditImageHappyPath:
         )
 
     @patch.object(cache, "get_model")
-    def test_fibo_edit_passes_singular_image_path(self, mock_get_model):
+    async def test_fibo_edit_passes_singular_image_path(self, mock_get_model):
         """FIBOEdit should receive image_path (singular), not image_paths."""
         mock_model, _ = self._make_mock_model()
         mock_get_model.return_value = mock_model
 
-        edit_image(
+        await edit_image(
             image_paths=["photo.jpg"],
             prompt="Remove background",
             model="fibo-edit",
@@ -327,12 +327,12 @@ class TestEditImageHappyPath:
         )
 
     @patch.object(cache, "get_model")
-    def test_fibo_edit_rmbg_passes_singular_image_path(self, mock_get_model):
+    async def test_fibo_edit_rmbg_passes_singular_image_path(self, mock_get_model):
         """fibo-edit-rmbg should also use singular image_path (same FIBOEdit class)."""
         mock_model, _ = self._make_mock_model()
         mock_get_model.return_value = mock_model
 
-        edit_image(
+        await edit_image(
             image_paths=["photo.jpg", "extra.jpg"],
             prompt="Remove background",
             model="fibo-edit-rmbg",
@@ -348,12 +348,12 @@ class TestEditImageHappyPath:
         )
 
     @patch.object(cache, "get_model")
-    def test_qwen_image_edit_passes_image_paths_list(self, mock_get_model):
+    async def test_qwen_image_edit_passes_image_paths_list(self, mock_get_model):
         """QwenImageEdit should receive image_paths (plural list)."""
         mock_model, _ = self._make_mock_model()
         mock_get_model.return_value = mock_model
 
-        edit_image(
+        await edit_image(
             image_paths=["scene.jpg"],
             prompt="Add a hat",
             model="qwen-image-edit",
@@ -369,11 +369,11 @@ class TestEditImageHappyPath:
         )
 
     @patch.object(cache, "get_model")
-    def test_auto_generates_seed_when_none(self, mock_get_model):
+    async def test_auto_generates_seed_when_none(self, mock_get_model):
         mock_model, _ = self._make_mock_model()
         mock_get_model.return_value = mock_model
 
-        edit_image(image_paths=["input.jpg"], prompt="test", seed=None)
+        await edit_image(image_paths=["input.jpg"], prompt="test", seed=None)
 
         call_kwargs = mock_model.generate_image.call_args[1]
         seed = call_kwargs["seed"]
@@ -381,30 +381,30 @@ class TestEditImageHappyPath:
         assert 0 <= seed <= 2**32 - 1
 
     @patch.object(cache, "get_model")
-    def test_returned_data_is_valid_png(self, mock_get_model):
+    async def test_returned_data_is_valid_png(self, mock_get_model):
         mock_model, _ = self._make_mock_model()
         mock_get_model.return_value = mock_model
 
-        result = edit_image(image_paths=["input.jpg"], prompt="test")
+        result = await edit_image(image_paths=["input.jpg"], prompt="test")
 
         # PNG magic bytes
         assert result.data[:4] == b"\x89PNG"
 
     @patch.object(cache, "get_model")
-    def test_returned_image_format_is_png(self, mock_get_model):
+    async def test_returned_image_format_is_png(self, mock_get_model):
         mock_model, _ = self._make_mock_model()
         mock_get_model.return_value = mock_model
 
-        result = edit_image(image_paths=["input.jpg"], prompt="test")
+        result = await edit_image(image_paths=["input.jpg"], prompt="test")
 
         assert result._format == "png"
 
     @patch.object(cache, "get_model")
-    def test_explicit_seed_is_used(self, mock_get_model):
+    async def test_explicit_seed_is_used(self, mock_get_model):
         mock_model, _ = self._make_mock_model()
         mock_get_model.return_value = mock_model
 
-        edit_image(image_paths=["input.jpg"], prompt="test", seed=54321)
+        await edit_image(image_paths=["input.jpg"], prompt="test", seed=54321)
 
         call_kwargs = mock_model.generate_image.call_args[1]
         assert call_kwargs["seed"] == 54321
@@ -413,32 +413,32 @@ class TestEditImageHappyPath:
 class TestEditImageErrors:
     """Tests for error handling in edit_image."""
 
-    def test_empty_image_paths_raises_value_error(self):
+    async def test_empty_image_paths_raises_value_error(self):
         with pytest.raises(ValueError, match="image_paths must contain at least one"):
-            edit_image(image_paths=[], prompt="test")
+            await edit_image(image_paths=[], prompt="test")
 
     @patch.object(cache, "get_model")
-    def test_invalid_model_raises_value_error(self, mock_get_model):
+    async def test_invalid_model_raises_value_error(self, mock_get_model):
         mock_get_model.side_effect = ValueError("Unknown model: 'bad-model'")
 
         with pytest.raises(ValueError, match="Unknown model"):
-            edit_image(image_paths=["input.jpg"], prompt="test", model="bad-model")
+            await edit_image(image_paths=["input.jpg"], prompt="test", model="bad-model")
 
     @patch.object(cache, "get_model")
-    def test_model_load_failure_raises_runtime_error(self, mock_get_model):
+    async def test_model_load_failure_raises_runtime_error(self, mock_get_model):
         mock_get_model.side_effect = RuntimeError("Failed to load model")
 
         with pytest.raises(RuntimeError, match="Failed to load"):
-            edit_image(image_paths=["input.jpg"], prompt="test")
+            await edit_image(image_paths=["input.jpg"], prompt="test")
 
     @patch.object(cache, "get_model")
-    def test_generation_failure_propagates(self, mock_get_model):
+    async def test_generation_failure_propagates(self, mock_get_model):
         mock_model = MagicMock()
         mock_model.generate_image.side_effect = RuntimeError("MLX error")
         mock_get_model.return_value = mock_model
 
         with pytest.raises(RuntimeError, match="MLX error"):
-            edit_image(image_paths=["input.jpg"], prompt="test")
+            await edit_image(image_paths=["input.jpg"], prompt="test")
 
 
 # ---------------------------------------------------------------------------
@@ -898,65 +898,65 @@ class TestGenerateImageOutputPath:
         assert sig.parameters["output_path"].default is None
 
     @patch.object(cache, "get_model")
-    def test_without_output_path_returns_image(self, mock_get_model):
+    async def test_without_output_path_returns_image(self, mock_get_model):
         """When output_path is omitted, returns a FastMCP Image (unchanged behavior)."""
         mock_get_model.return_value = self._make_mock_model()
 
-        result = generate_image(prompt="test")
+        result = await generate_image(prompt="test")
 
         assert isinstance(result, Image)
         assert result.data[:4] == b"\x89PNG"
 
     @patch.object(cache, "get_model")
-    def test_with_output_path_returns_string(self, mock_get_model, tmp_path):
+    async def test_with_output_path_returns_string(self, mock_get_model, tmp_path):
         """When output_path is provided, returns the absolute file path as a string."""
         mock_get_model.return_value = self._make_mock_model()
         out = str(tmp_path / "output.png")
 
-        result = generate_image(prompt="test", output_path=out)
+        result = await generate_image(prompt="test", output_path=out)
 
         assert isinstance(result, str)
         assert result == out
 
     @patch.object(cache, "get_model")
-    def test_with_output_path_file_is_created(self, mock_get_model, tmp_path):
+    async def test_with_output_path_file_is_created(self, mock_get_model, tmp_path):
         """When output_path is provided, the file is actually written to disk."""
         mock_get_model.return_value = self._make_mock_model()
         out = str(tmp_path / "output.png")
 
-        generate_image(prompt="test", output_path=out)
+        await generate_image(prompt="test", output_path=out)
 
         assert os.path.isfile(out)
 
     @patch.object(cache, "get_model")
-    def test_with_output_path_file_is_valid_png(self, mock_get_model, tmp_path):
+    async def test_with_output_path_file_is_valid_png(self, mock_get_model, tmp_path):
         """The file written to disk should be a valid PNG."""
         mock_get_model.return_value = self._make_mock_model()
         out = str(tmp_path / "output.png")
 
-        generate_image(prompt="test", output_path=out)
+        await generate_image(prompt="test", output_path=out)
 
         with open(out, "rb") as f:
             assert f.read(4) == b"\x89PNG"
 
     @patch.object(cache, "get_model")
-    def test_with_output_path_creates_parent_dirs(self, mock_get_model, tmp_path):
+    async def test_with_output_path_creates_parent_dirs(self, mock_get_model, tmp_path):
         """Parent directories should be created automatically."""
         mock_get_model.return_value = self._make_mock_model()
         out = str(tmp_path / "nested" / "deep" / "output.png")
 
-        result = generate_image(prompt="test", output_path=out)
+        result = await generate_image(prompt="test", output_path=out)
 
         assert os.path.isfile(out)
         assert result == out
 
     @patch.object(cache, "get_model")
-    def test_with_output_path_returns_absolute_path(self, mock_get_model, tmp_path):
+    async def test_with_output_path_returns_absolute_path(self, mock_get_model, tmp_path):
         """Even if a relative path is given, the returned path should be absolute."""
         mock_get_model.return_value = self._make_mock_model()
         out = str(tmp_path / "output.png")
 
-        result = generate_image(prompt="test", output_path=out)
+        result = await generate_image(prompt="test", output_path=out)
 
         assert os.path.isabs(result)
 
@@ -978,65 +978,65 @@ class TestEditImageOutputPath:
         assert sig.parameters["output_path"].default is None
 
     @patch.object(cache, "get_model")
-    def test_without_output_path_returns_image(self, mock_get_model):
+    async def test_without_output_path_returns_image(self, mock_get_model):
         """When output_path is omitted, returns a FastMCP Image (unchanged behavior)."""
         mock_get_model.return_value = self._make_mock_model()
 
-        result = edit_image(image_paths=["input.jpg"], prompt="test")
+        result = await edit_image(image_paths=["input.jpg"], prompt="test")
 
         assert isinstance(result, Image)
         assert result.data[:4] == b"\x89PNG"
 
     @patch.object(cache, "get_model")
-    def test_with_output_path_returns_string(self, mock_get_model, tmp_path):
+    async def test_with_output_path_returns_string(self, mock_get_model, tmp_path):
         """When output_path is provided, returns the absolute file path as a string."""
         mock_get_model.return_value = self._make_mock_model()
         out = str(tmp_path / "edited.png")
 
-        result = edit_image(image_paths=["input.jpg"], prompt="test", output_path=out)
+        result = await edit_image(image_paths=["input.jpg"], prompt="test", output_path=out)
 
         assert isinstance(result, str)
         assert result == out
 
     @patch.object(cache, "get_model")
-    def test_with_output_path_file_is_created(self, mock_get_model, tmp_path):
+    async def test_with_output_path_file_is_created(self, mock_get_model, tmp_path):
         """When output_path is provided, the file is actually written to disk."""
         mock_get_model.return_value = self._make_mock_model()
         out = str(tmp_path / "edited.png")
 
-        edit_image(image_paths=["input.jpg"], prompt="test", output_path=out)
+        await edit_image(image_paths=["input.jpg"], prompt="test", output_path=out)
 
         assert os.path.isfile(out)
 
     @patch.object(cache, "get_model")
-    def test_with_output_path_file_is_valid_png(self, mock_get_model, tmp_path):
+    async def test_with_output_path_file_is_valid_png(self, mock_get_model, tmp_path):
         """The file written to disk should be a valid PNG."""
         mock_get_model.return_value = self._make_mock_model()
         out = str(tmp_path / "edited.png")
 
-        edit_image(image_paths=["input.jpg"], prompt="test", output_path=out)
+        await edit_image(image_paths=["input.jpg"], prompt="test", output_path=out)
 
         with open(out, "rb") as f:
             assert f.read(4) == b"\x89PNG"
 
     @patch.object(cache, "get_model")
-    def test_with_output_path_creates_parent_dirs(self, mock_get_model, tmp_path):
+    async def test_with_output_path_creates_parent_dirs(self, mock_get_model, tmp_path):
         """Parent directories should be created automatically."""
         mock_get_model.return_value = self._make_mock_model()
         out = str(tmp_path / "nested" / "deep" / "edited.png")
 
-        result = edit_image(image_paths=["input.jpg"], prompt="test", output_path=out)
+        result = await edit_image(image_paths=["input.jpg"], prompt="test", output_path=out)
 
         assert os.path.isfile(out)
         assert result == out
 
     @patch.object(cache, "get_model")
-    def test_with_output_path_returns_absolute_path(self, mock_get_model, tmp_path):
+    async def test_with_output_path_returns_absolute_path(self, mock_get_model, tmp_path):
         """Even if a relative path is given, the returned path should be absolute."""
         mock_get_model.return_value = self._make_mock_model()
         out = str(tmp_path / "edited.png")
 
-        result = edit_image(image_paths=["input.jpg"], prompt="test", output_path=out)
+        result = await edit_image(image_paths=["input.jpg"], prompt="test", output_path=out)
 
         assert os.path.isabs(result)
 
@@ -1058,20 +1058,20 @@ class TestGenerateImageLoraStyle:
         return mock_model
 
     @patch.object(cache, "get_model")
-    def test_lora_style_passed_to_get_model(self, mock_get_model):
+    async def test_lora_style_passed_to_get_model(self, mock_get_model):
         """lora_style should be forwarded to cache.get_model."""
         mock_get_model.return_value = self._make_mock_model()
 
-        generate_image(prompt="x", lora_style="portrait")
+        await generate_image(prompt="x", lora_style="portrait")
 
         mock_get_model.assert_called_once_with("flux2-klein-4b", quantize=8, lora_style="portrait")
 
     @patch.object(cache, "get_model")
-    def test_no_lora_style_default(self, mock_get_model):
+    async def test_no_lora_style_default(self, mock_get_model):
         """When lora_style is omitted, None should be passed to cache.get_model."""
         mock_get_model.return_value = self._make_mock_model()
 
-        generate_image(prompt="x")
+        await generate_image(prompt="x")
 
         mock_get_model.assert_called_once_with("flux2-klein-4b", quantize=8, lora_style=None)
 
@@ -1088,19 +1088,150 @@ class TestEditImageLoraStyle:
         return mock_model
 
     @patch.object(cache, "get_model")
-    def test_lora_style_passed_to_get_model(self, mock_get_model):
+    async def test_lora_style_passed_to_get_model(self, mock_get_model):
         """lora_style should be forwarded to cache.get_model for edit_image."""
         mock_get_model.return_value = self._make_mock_model()
 
-        edit_image(image_paths=["img.png"], prompt="x", lora_style="portrait")
+        await edit_image(image_paths=["img.png"], prompt="x", lora_style="portrait")
 
         mock_get_model.assert_called_once_with("flux2-klein-edit", quantize=8, lora_style="portrait")
 
     @patch.object(cache, "get_model")
-    def test_no_lora_style_default(self, mock_get_model):
+    async def test_no_lora_style_default(self, mock_get_model):
         """When lora_style is omitted, None should be passed to cache.get_model."""
         mock_get_model.return_value = self._make_mock_model()
 
-        edit_image(image_paths=["img.png"], prompt="x")
+        await edit_image(image_paths=["img.png"], prompt="x")
 
         mock_get_model.assert_called_once_with("flux2-klein-edit", quantize=8, lora_style=None)
+
+
+# ---------------------------------------------------------------------------
+# Inference lock tests
+# ---------------------------------------------------------------------------
+
+
+class TestInferenceLock:
+    """Tests that _inference_lock serializes concurrent inference calls."""
+
+    def test_inference_lock_is_semaphore(self):
+        """_inference_lock is a Semaphore with value 1."""
+        import asyncio
+        from server import _inference_lock
+        assert isinstance(_inference_lock, asyncio.Semaphore)
+
+    def test_list_models_does_not_use_lock(self):
+        """list_models is a plain sync function (not async)."""
+        import inspect
+        from server import list_models
+        assert not inspect.iscoroutinefunction(list_models)
+
+    def test_get_image_metadata_does_not_use_lock(self):
+        """get_image_metadata is a plain sync function (not async)."""
+        import inspect
+        from server import get_image_metadata
+        assert not inspect.iscoroutinefunction(get_image_metadata)
+
+    def test_generate_image_is_async(self):
+        """generate_image is a coroutine function."""
+        import inspect
+        from server import generate_image
+        assert inspect.iscoroutinefunction(generate_image)
+
+    def test_edit_image_is_async(self):
+        """edit_image is a coroutine function."""
+        import inspect
+        from server import edit_image
+        assert inspect.iscoroutinefunction(edit_image)
+
+    async def test_concurrent_generate_image_serialized(self):
+        """Two concurrent generate_image calls complete without error (lock works)."""
+        import asyncio
+
+        def _make_mock():
+            mock_pil_image = PIL.Image.new("RGB", (64, 64), color="red")
+            mock_generated = MagicMock()
+            mock_generated.image = mock_pil_image
+            mock_model = MagicMock()
+            mock_model.generate_image.return_value = mock_generated
+            return mock_model
+
+        with patch.object(cache, "get_model", return_value=_make_mock()):
+            results = await asyncio.gather(
+                generate_image(prompt="first"),
+                generate_image(prompt="second"),
+            )
+        assert len(results) == 2
+        for r in results:
+            assert r.data[:4] == b"\x89PNG"
+
+    def test_lock_not_acquired_after_list_models(self):
+        """After calling list_models, _inference_lock should still be free."""
+        from server import _inference_lock
+        list_models()
+        assert not _inference_lock.locked()
+
+    def test_generate_and_edit_share_same_lock(self):
+        """_inference_lock is a module-level asyncio.Semaphore accessible from server."""
+        import asyncio
+        import server
+        assert isinstance(server._inference_lock, asyncio.Semaphore)
+
+
+class TestProgressNotifications:
+    """Tests for MCP progress notifications in generate_image and edit_image."""
+
+    async def test_generate_image_emits_queued_progress(self):
+        ctx = AsyncMock()
+        mock_model = MagicMock()
+        mock_model.generate_image.return_value = MagicMock(image=MagicMock())
+        with patch.object(cache, "get_model", return_value=mock_model):
+            await generate_image(prompt="test", output_path=None, ctx=ctx)
+        ctx.report_progress.assert_any_call(0, 4, "queued")
+
+    async def test_generate_image_emits_loading_progress(self):
+        ctx = AsyncMock()
+        mock_model = MagicMock()
+        mock_model.generate_image.return_value = MagicMock(image=MagicMock())
+        with patch.object(cache, "get_model", return_value=mock_model):
+            await generate_image(prompt="test", output_path=None, ctx=ctx)
+        ctx.report_progress.assert_any_call(1, 4, "loading model")
+
+    async def test_generate_image_emits_generating_progress(self):
+        ctx = AsyncMock()
+        mock_model = MagicMock()
+        mock_model.generate_image.return_value = MagicMock(image=MagicMock())
+        with patch.object(cache, "get_model", return_value=mock_model):
+            await generate_image(prompt="test", output_path=None, ctx=ctx)
+        ctx.report_progress.assert_any_call(2, 4, "generating")
+
+    async def test_generate_image_emits_saving_progress(self):
+        ctx = AsyncMock()
+        mock_model = MagicMock()
+        mock_model.generate_image.return_value = MagicMock(image=MagicMock())
+        with patch.object(cache, "get_model", return_value=mock_model):
+            await generate_image(prompt="test", output_path=None, ctx=ctx)
+        ctx.report_progress.assert_any_call(3, 4, "saving")
+
+    async def test_edit_image_emits_all_progress_stages(self):
+        ctx = AsyncMock()
+        mock_model = MagicMock()
+        mock_model.generate_image.return_value = MagicMock(image=MagicMock())
+        with patch.object(cache, "get_model", return_value=mock_model):
+            await edit_image(image_paths=["img.png"], prompt="test", output_path=None, ctx=ctx)
+        for stage, label in [(0, "queued"), (1, "loading model"), (2, "generating"), (3, "saving")]:
+            ctx.report_progress.assert_any_call(stage, 4, label)
+
+    async def test_generate_image_no_ctx_does_not_crash(self):
+        """Calling without ctx (ctx=None) must not raise."""
+        mock_model = MagicMock()
+        mock_model.generate_image.return_value = MagicMock(image=MagicMock())
+        with patch.object(cache, "get_model", return_value=mock_model):
+            await generate_image(prompt="test", output_path=None)  # no ctx
+
+    async def test_ctx_not_in_generate_image_schema(self):
+        """ctx must not be visible in the MCP tool schema (hidden by FastMCP injection)."""
+        tools = await mcp.list_tools()
+        gen_tool = next(t for t in tools if t.name == "generate_image")
+        schema_props = gen_tool.parameters.get("properties", {})
+        assert "ctx" not in schema_props

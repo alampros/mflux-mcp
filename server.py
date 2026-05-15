@@ -1,10 +1,11 @@
 """mflux-mcp — MCP server exposing mflux image generation to LLM agents."""
 
+import asyncio
 import io
 import os
 import random
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 from fastmcp.utilities.types import Image
 from mflux.utils.metadata_reader import MetadataReader
 
@@ -12,10 +13,11 @@ from mflux_cache import ModelCache, _REPO_MAP, is_model_cached
 
 mcp = FastMCP("mflux-mcp")
 cache = ModelCache()
+_inference_lock = asyncio.Semaphore(1)
 
 
 @mcp.tool()
-def generate_image(
+async def generate_image(
     prompt: str,
     model: str = "flux2-klein-4b",
     width: int = 1024,
@@ -25,6 +27,7 @@ def generate_image(
     quantize: int = 8,
     output_path: str | None = None,
     lora_style: str | None = None,
+    ctx: Context | None = None,
 ) -> Image | str:
     """Generate an image from a text prompt using mflux.
 
@@ -51,34 +54,45 @@ def generate_image(
     if seed is None:
         seed = random.randint(0, 2**32 - 1)
 
-    loaded_model = cache.get_model(model, quantize=quantize, lora_style=lora_style)
+    if ctx is not None:
+        await ctx.report_progress(0, 4, "queued")
 
-    result = loaded_model.generate_image(
-        seed=seed,
-        prompt=prompt,
-        num_inference_steps=steps,
-        width=width,
-        height=height,
-    )
+    async with _inference_lock:
+        if ctx is not None:
+            await ctx.report_progress(1, 4, "loading model")
+        loaded_model = cache.get_model(model, quantize=quantize, lora_style=lora_style)
 
-    buf = io.BytesIO()
-    result.image.save(buf, format="PNG")
-    image_bytes = buf.getvalue()
+        if ctx is not None:
+            await ctx.report_progress(2, 4, "generating")
+        # TODO: per-step progress requires running inference in asyncio.to_thread() — mflux callbacks are sync and block the event loop
+        result = loaded_model.generate_image(
+            seed=seed,
+            prompt=prompt,
+            num_inference_steps=steps,
+            width=width,
+            height=height,
+        )
 
-    if output_path is not None:
-        output_path = os.path.abspath(output_path)
-        parent = os.path.dirname(output_path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        with open(output_path, "wb") as f:
-            f.write(image_bytes)
-        return output_path
+        if ctx is not None:
+            await ctx.report_progress(3, 4, "saving")
+        buf = io.BytesIO()
+        result.image.save(buf, format="PNG")
+        image_bytes = buf.getvalue()
 
-    return Image(data=image_bytes, format="png")
+        if output_path is not None:
+            output_path = os.path.abspath(output_path)
+            parent = os.path.dirname(output_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(output_path, "wb") as f:
+                f.write(image_bytes)
+            return output_path
+
+        return Image(data=image_bytes, format="png")
 
 
 @mcp.tool()
-def edit_image(
+async def edit_image(
     image_paths: list[str],
     prompt: str,
     model: str = "flux2-klein-edit",
@@ -87,6 +101,7 @@ def edit_image(
     quantize: int = 8,
     output_path: str | None = None,
     lora_style: str | None = None,
+    ctx: Context | None = None,
 ) -> Image | str:
     """Edit an image using an mflux edit model.
 
@@ -123,40 +138,51 @@ def edit_image(
     if seed is None:
         seed = random.randint(0, 2**32 - 1)
 
-    loaded_model = cache.get_model(model, quantize=quantize, lora_style=lora_style)
+    if ctx is not None:
+        await ctx.report_progress(0, 4, "queued")
 
-    # FIBOEdit takes a singular image_path argument, while Flux2KleinEdit
-    # and QwenImageEdit accept a plural image_paths list.
-    class_key = ModelCache._REGISTRY[model][0]
-    if class_key == "FIBOEdit":
-        result = loaded_model.generate_image(
-            seed=seed,
-            prompt=prompt,
-            image_path=image_paths[0],
-            num_inference_steps=steps,
-        )
-    else:
-        result = loaded_model.generate_image(
-            seed=seed,
-            prompt=prompt,
-            image_paths=image_paths,
-            num_inference_steps=steps,
-        )
+    async with _inference_lock:
+        if ctx is not None:
+            await ctx.report_progress(1, 4, "loading model")
+        loaded_model = cache.get_model(model, quantize=quantize, lora_style=lora_style)
 
-    buf = io.BytesIO()
-    result.image.save(buf, format="PNG")
-    image_bytes = buf.getvalue()
+        if ctx is not None:
+            await ctx.report_progress(2, 4, "generating")
+        # FIBOEdit takes a singular image_path argument, while Flux2KleinEdit
+        # and QwenImageEdit accept a plural image_paths list.
+        class_key = ModelCache._REGISTRY[model][0]
+        # TODO: per-step progress requires running inference in asyncio.to_thread() — mflux callbacks are sync and block the event loop
+        if class_key == "FIBOEdit":
+            result = loaded_model.generate_image(
+                seed=seed,
+                prompt=prompt,
+                image_path=image_paths[0],
+                num_inference_steps=steps,
+            )
+        else:
+            result = loaded_model.generate_image(
+                seed=seed,
+                prompt=prompt,
+                image_paths=image_paths,
+                num_inference_steps=steps,
+            )
 
-    if output_path is not None:
-        output_path = os.path.abspath(output_path)
-        parent = os.path.dirname(output_path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        with open(output_path, "wb") as f:
-            f.write(image_bytes)
-        return output_path
+        if ctx is not None:
+            await ctx.report_progress(3, 4, "saving")
+        buf = io.BytesIO()
+        result.image.save(buf, format="PNG")
+        image_bytes = buf.getvalue()
 
-    return Image(data=image_bytes, format="png")
+        if output_path is not None:
+            output_path = os.path.abspath(output_path)
+            parent = os.path.dirname(output_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(output_path, "wb") as f:
+                f.write(image_bytes)
+            return output_path
+
+        return Image(data=image_bytes, format="png")
 
 
 # ---------------------------------------------------------------------------
