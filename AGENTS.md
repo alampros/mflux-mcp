@@ -19,9 +19,32 @@ If it exits non-zero, stop and report the issue. Do not proceed with tasks until
 | File | Purpose |
 |------|---------|
 | `PLAN.md` | Project plan with architecture, tool specs, test plan, and mflux API reference |
-| `server.py` | MCP server entry point (FastMCP) |
+| `server.py` | MCP server entry point (FastMCP, registers 4 tools) |
+| `mflux_cache.py` | Thread-safe lazy model cache, model registry (17 variants), HF cache detection |
 | `pyproject.toml` | Python project config (uv), dependencies |
-| `tests/` | pytest test suite |
+| `tests/` | pytest test suite (2 test files, 19 test classes) |
+| `health.sh` | Health check script (toolchain, tests, hardware, harness) |
+| `README.md` | User-facing documentation |
+
+## Project structure
+
+```
+mflux-mcp/
+├── server.py              # MCP server entry point (FastMCP, 4 tools)
+├── mflux_cache.py         # Thread-safe lazy model cache & registry
+├── pyproject.toml         # Python project config (uv)
+├── health.sh              # Project health check script
+├── PLAN.md                # Architecture & design document
+├── AGENTS.md              # This file — agent navigation guide
+├── README.md              # User-facing documentation
+├── LICENSE                # MIT License
+├── tests/
+│   ├── conftest.py        # Test config (adds repo root to sys.path)
+│   ├── test_server.py     # MCP tool tests (15 test classes, ~1041 lines)
+│   └── test_model_cache.py # Model cache tests (4 test classes, ~214 lines)
+├── output/                # Generated images directory (gitignored)
+└── .harness/              # Harness data (see below)
+```
 
 ## Harness data (source of truth)
 
@@ -89,10 +112,43 @@ docs.search          query                                  -> search ./docs for
 | Testing | pytest, pytest-asyncio |
 | Transport | stdio (default), HTTP (optional) |
 
+## Development
+
+### Running tests
+
+```bash
+uv run pytest tests/
+```
+
+All tests use mocks — no GPU or downloaded models are needed. The two test files cover:
+
+- **`test_server.py`** (15 classes): Tool registration, parameter defaults, happy-path generation/editing with mock models, error handling, output path behavior, CLI transport parsing, list_models structure, metadata inspection
+- **`test_model_cache.py`** (4 classes): Registry structure, cache get/hit/miss, cache clearing, lazy import verification
+
+### What health.sh checks
+
+1. Toolchain — `uv` and `python3` exist
+2. mflux CLI — `mflux-generate-flux2` exists (installed as a uv tool)
+3. Project files — `pyproject.toml` and `server.py` exist
+4. Tests — `tests/` dir has `test_*.py` files, `uv run pytest tests/` passes
+5. Docs — `PLAN.md` exists
+6. Harness — `.harness/feature_list.json` exists and is non-empty
+7. Hardware — `uname -m == arm64` (Apple Silicon)
+
 ## What to read
 
 ```
 Always:          PLAN.md, .harness/current.md (or MCP tasks.get)
-If implementing: server.py, pyproject.toml, tests/
+If implementing: server.py, mflux_cache.py, pyproject.toml, tests/
 If debugging:    mflux docs at https://github.com/filipstrand/mflux
 ```
+
+## Gotchas
+
+- **Apple Silicon is a hard requirement.** mflux depends on MLX which only runs on arm64 macOS. There is no Linux or Intel Mac support.
+- **mflux is both a dependency and a uv tool.** `uv sync` installs it as a Python library (imported by server.py). `uv tool install mflux` installs it as a CLI tool (checked by health.sh). Both are needed.
+- **Lazy imports.** `mflux_cache.py` defers all mflux imports until the first model is loaded. This keeps `list_models` fast and avoids importing heavy ML libraries at startup. Tests verify this with `sys.modules` checks.
+- **All tests use mocks.** No actual model loading or GPU inference happens in the test suite. Tests mock `ModelCache.get_model()` and the mflux model classes.
+- **Generated images are gitignored.** The `output/` directory and all `*.png`, `*.jpg`, `*.jpeg`, `*.webp` files are in `.gitignore`.
+- **No entry point scripts.** The server is run directly via `uv run server.py`, not through a console_scripts entry point.
+- **PLAN.md references `test_tools.py`** but the actual test file is `test_server.py`. Trust the filesystem, not PLAN.md.

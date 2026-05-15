@@ -13,7 +13,7 @@ import pytest
 from fastmcp.utilities.types import Image
 
 from server import mcp, generate_image, edit_image, list_models, get_image_metadata, cache, parse_args
-from mflux_cache import ModelCache
+from mflux_cache import ModelCache, _REPO_MAP, is_model_cached, _default_hf_cache_dir
 
 
 class TestServerSetup:
@@ -474,7 +474,7 @@ class TestListModels:
             assert isinstance(entry, dict)
 
     def test_each_entry_has_required_fields(self):
-        required_fields = {"name", "family", "capability", "supports_lora", "quantize_options"}
+        required_fields = {"name", "family", "capability", "supports_lora", "quantize_options", "is_downloaded"}
         result = list_models()
         for entry in result:
             assert required_fields.issubset(entry.keys()), (
@@ -518,6 +518,14 @@ class TestListModels:
         for entry in result:
             assert entry["quantize_options"] == [4, 8, None]
 
+    def test_is_downloaded_is_boolean(self):
+        """is_downloaded field should be a boolean for every model."""
+        result = list_models()
+        for entry in result:
+            assert isinstance(entry["is_downloaded"], bool), (
+                f"is_downloaded is not bool for {entry['name']}"
+            )
+
     def test_does_not_trigger_mflux_import(self):
         """list_models should only read the static _REGISTRY, not trigger mflux imports."""
         import sys
@@ -530,6 +538,196 @@ class TestListModels:
 
         imported = [k for k in sys.modules if k.startswith("mflux.")]
         assert imported == [], f"list_models triggered mflux imports: {imported}"
+
+
+# ---------------------------------------------------------------------------
+# is_model_cached / HF cache detection tests
+# ---------------------------------------------------------------------------
+
+
+class TestIsModelCached:
+    """Tests for the is_model_cached function using tmp_path fixtures."""
+
+    def _make_cached_model(self, tmp_path, repo_id, with_safetensors=True):
+        """Create a fake HF cache directory structure for a model.
+
+        Args:
+            tmp_path: pytest tmp_path fixture.
+            repo_id: HuggingFace repo ID (e.g. "org/model").
+            with_safetensors: If True, create .safetensors files in snapshots.
+
+        Returns:
+            The tmp_path (to pass as cache_dir).
+        """
+        dir_name = "models--" + repo_id.replace("/", "--")
+        model_dir = tmp_path / dir_name
+        snapshots_dir = model_dir / "snapshots" / "abc123"
+        transformer_dir = snapshots_dir / "transformer"
+        transformer_dir.mkdir(parents=True)
+
+        # Always create metadata files
+        (transformer_dir / "config.json").write_text("{}")
+
+        if with_safetensors:
+            (transformer_dir / "diffusion_pytorch_model.safetensors").write_bytes(b"\x00" * 100)
+
+        # Create blobs and refs dirs (realistic structure)
+        (model_dir / "blobs").mkdir(exist_ok=True)
+        (model_dir / "refs").mkdir(exist_ok=True)
+
+        return tmp_path
+
+    def test_returns_true_for_fully_cached_model(self, tmp_path):
+        """A model with .safetensors files should be detected as cached."""
+        cache_dir = self._make_cached_model(tmp_path, "org/my-model", with_safetensors=True)
+        assert is_model_cached("org/my-model", cache_dir=cache_dir) is True
+
+    def test_returns_false_for_missing_model(self, tmp_path):
+        """A model not in the cache at all should return False."""
+        assert is_model_cached("org/nonexistent-model", cache_dir=tmp_path) is False
+
+    def test_returns_false_for_partial_download(self, tmp_path):
+        """A model dir with metadata but no .safetensors should return False."""
+        cache_dir = self._make_cached_model(tmp_path, "org/partial-model", with_safetensors=False)
+        assert is_model_cached("org/partial-model", cache_dir=cache_dir) is False
+
+    def test_returns_false_for_empty_dir(self, tmp_path):
+        """A model dir that exists but is empty should return False."""
+        dir_name = "models--org--empty-model"
+        (tmp_path / dir_name).mkdir()
+        assert is_model_cached("org/empty-model", cache_dir=tmp_path) is False
+
+    def test_returns_false_when_no_snapshots_dir(self, tmp_path):
+        """A model dir without a snapshots subdirectory should return False."""
+        dir_name = "models--org--no-snapshots"
+        model_dir = tmp_path / dir_name
+        model_dir.mkdir()
+        (model_dir / "blobs").mkdir()
+        (model_dir / "refs").mkdir()
+        assert is_model_cached("org/no-snapshots", cache_dir=tmp_path) is False
+
+    def test_handles_nested_safetensors(self, tmp_path):
+        """Safetensors files in nested subdirectories should be detected."""
+        dir_name = "models--org--nested-model"
+        deep_dir = tmp_path / dir_name / "snapshots" / "rev1" / "text_encoder" / "sub"
+        deep_dir.mkdir(parents=True)
+        (deep_dir / "model.safetensors").write_bytes(b"\x00" * 50)
+        # Also need blobs/refs for realism
+        (tmp_path / dir_name / "blobs").mkdir(exist_ok=True)
+        (tmp_path / dir_name / "refs").mkdir(exist_ok=True)
+        assert is_model_cached("org/nested-model", cache_dir=tmp_path) is True
+
+    def test_repo_id_with_special_chars(self, tmp_path):
+        """Repo IDs with dots and hyphens should map correctly to cache dirs."""
+        cache_dir = self._make_cached_model(tmp_path, "black-forest-labs/FLUX.2-klein-4B")
+        assert is_model_cached("black-forest-labs/FLUX.2-klein-4B", cache_dir=cache_dir) is True
+
+    def test_does_not_load_model_weights(self, tmp_path):
+        """Calling is_model_cached should not import mflux or load models."""
+        import sys
+        mflux_before = set(k for k in sys.modules if k.startswith("mflux."))
+
+        cache_dir = self._make_cached_model(tmp_path, "org/test-model")
+        is_model_cached("org/test-model", cache_dir=cache_dir)
+
+        mflux_after = set(k for k in sys.modules if k.startswith("mflux."))
+        new_imports = mflux_after - mflux_before
+        assert new_imports == set(), f"is_model_cached triggered mflux imports: {new_imports}"
+
+
+class TestRepoMap:
+    """Tests for the _REPO_MAP static mapping."""
+
+    def test_repo_map_covers_all_registry_config_factories(self):
+        """Every config_factory_name in _REGISTRY should have an entry in _REPO_MAP."""
+        for name, (_class_key, config_factory_name, _lora) in ModelCache._REGISTRY.items():
+            assert config_factory_name in _REPO_MAP, (
+                f"Model '{name}' uses config factory '{config_factory_name}' "
+                f"which is missing from _REPO_MAP"
+            )
+
+    def test_repo_map_values_are_valid_hf_repo_ids(self):
+        """Each _REPO_MAP value should be a valid org/model format."""
+        for factory_name, repo_id in _REPO_MAP.items():
+            assert "/" in repo_id, (
+                f"_REPO_MAP['{factory_name}'] = '{repo_id}' is not a valid HF repo ID"
+            )
+            parts = repo_id.split("/")
+            assert len(parts) == 2, (
+                f"_REPO_MAP['{factory_name}'] = '{repo_id}' should have exactly one '/'"
+            )
+            assert all(part for part in parts), (
+                f"_REPO_MAP['{factory_name}'] = '{repo_id}' has empty org or model name"
+            )
+
+
+class TestDefaultHfCacheDir:
+    """Tests for the _default_hf_cache_dir helper."""
+
+    def test_default_path_ends_with_hub(self):
+        """Default cache dir should end with 'hub'."""
+        from pathlib import Path
+        result = _default_hf_cache_dir()
+        assert result.name == "hub"
+
+    @patch.dict(os.environ, {"HF_HUB_CACHE": "/custom/cache/path"}, clear=False)
+    def test_respects_hf_hub_cache_env(self):
+        """HF_HUB_CACHE env var should override the default."""
+        from pathlib import Path
+        result = _default_hf_cache_dir()
+        assert result == Path("/custom/cache/path")
+
+    @patch.dict(os.environ, {"HF_HOME": "/custom/hf_home"}, clear=False)
+    def test_respects_hf_home_env(self):
+        """HF_HOME env var should be used when HF_HUB_CACHE is not set."""
+        from pathlib import Path
+        # Make sure HF_HUB_CACHE isn't set
+        env = os.environ.copy()
+        env.pop("HF_HUB_CACHE", None)
+        with patch.dict(os.environ, env, clear=True):
+            os.environ["HF_HOME"] = "/custom/hf_home"
+            result = _default_hf_cache_dir()
+            assert result == Path("/custom/hf_home/hub")
+
+
+class TestListModelsDownloadStatus:
+    """Integration tests for the is_downloaded field in list_models."""
+
+    @patch("server.is_model_cached")
+    def test_list_models_calls_is_model_cached_for_each_model(self, mock_cached):
+        """list_models should check cache status for every model."""
+        mock_cached.return_value = False
+        result = list_models()
+        # Should have been called once per model in registry
+        assert mock_cached.call_count == len(ModelCache._REGISTRY)
+
+    @patch("server.is_model_cached", return_value=True)
+    def test_all_cached_shows_all_downloaded(self, mock_cached):
+        """When all models are cached, every entry should have is_downloaded=True."""
+        result = list_models()
+        for entry in result:
+            assert entry["is_downloaded"] is True
+
+    @patch("server.is_model_cached", return_value=False)
+    def test_none_cached_shows_none_downloaded(self, mock_cached):
+        """When no models are cached, every entry should have is_downloaded=False."""
+        result = list_models()
+        for entry in result:
+            assert entry["is_downloaded"] is False
+
+    @patch("server.is_model_cached")
+    def test_mixed_cache_status(self, mock_cached):
+        """When some models are cached and others aren't, is_downloaded reflects reality."""
+        # Make only "schnell" appear cached
+        def side_effect(repo_id):
+            return repo_id == "black-forest-labs/FLUX.1-schnell"
+        mock_cached.side_effect = side_effect
+
+        result = list_models()
+        schnell = next(e for e in result if e["name"] == "schnell")
+        dev = next(e for e in result if e["name"] == "dev")
+        assert schnell["is_downloaded"] is True
+        assert dev["is_downloaded"] is False
 
 
 # ---------------------------------------------------------------------------

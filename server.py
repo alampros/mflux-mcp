@@ -8,7 +8,7 @@ from fastmcp import FastMCP
 from fastmcp.utilities.types import Image
 from mflux.utils.metadata_reader import MetadataReader
 
-from mflux_cache import ModelCache
+from mflux_cache import ModelCache, _REPO_MAP, is_model_cached
 
 mcp = FastMCP("mflux-mcp")
 cache = ModelCache()
@@ -195,15 +195,19 @@ def list_models() -> list[dict]:
             - capability: One of "txt2img", "edit", or "upscale".
             - supports_lora: Whether the model accepts LoRA adapters.
             - quantize_options: Valid quantize values (list of ints or None).
+            - is_downloaded: Whether the model weights are locally cached.
     """
     models: list[dict] = []
-    for name, (class_key, _config_factory, supports_lora) in ModelCache._REGISTRY.items():
+    for name, (class_key, config_factory_name, supports_lora) in ModelCache._REGISTRY.items():
+        repo_id = _REPO_MAP.get(config_factory_name)
+        downloaded = is_model_cached(repo_id) if repo_id else False
         models.append({
             "name": name,
             "family": _FAMILY_MAP[class_key],
             "capability": _CAPABILITY_MAP[class_key],
             "supports_lora": supports_lora,
             "quantize_options": [4, 8, None],
+            "is_downloaded": downloaded,
         })
     return models
 

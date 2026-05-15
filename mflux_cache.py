@@ -6,7 +6,9 @@ that take several seconds to load — caching avoids reloading on every
 generation call.
 """
 
+import os
 import threading
+from pathlib import Path
 from typing import Any, Callable
 
 
@@ -77,6 +79,91 @@ def _build_registry() -> dict[str, tuple[str, Callable, bool]]:
         "seedvr2-3b": ("SeedVR2", "seedvr2_3b", False),
         "seedvr2-7b": ("SeedVR2", "seedvr2_7b", False),
     }
+
+
+# ---------------------------------------------------------------------------
+# HuggingFace cache detection (static — no mflux imports triggered)
+# ---------------------------------------------------------------------------
+
+# Static mapping from config_factory_name -> HuggingFace repo ID.
+# Kept in sync with the values returned by ModelConfig factory methods.
+# This avoids triggering heavy mflux imports just to read repo names.
+_REPO_MAP: dict[str, str] = {
+    "schnell": "black-forest-labs/FLUX.1-schnell",
+    "dev": "black-forest-labs/FLUX.1-dev",
+    "flux2_klein_4b": "black-forest-labs/FLUX.2-klein-4B",
+    "flux2_klein_9b": "black-forest-labs/FLUX.2-klein-9B",
+    "flux2_klein_base_4b": "black-forest-labs/FLUX.2-klein-base-4B",
+    "flux2_klein_base_9b": "black-forest-labs/FLUX.2-klein-base-9B",
+    "z_image": "Tongyi-MAI/Z-Image",
+    "z_image_turbo": "Tongyi-MAI/Z-Image-Turbo",
+    "fibo": "briaai/FIBO",
+    "fibo_lite": "briaai/Fibo-lite",
+    "fibo_edit": "briaai/Fibo-Edit",
+    "fibo_edit_rmbg": "briaai/Fibo-Edit-RMBG",
+    "qwen_image": "Qwen/Qwen-Image",
+    "qwen_image_edit": "Qwen/Qwen-Image-Edit-2509",
+    "seedvr2_3b": "numz/SeedVR2_comfyUI",
+    "seedvr2_7b": "numz/SeedVR2_comfyUI",
+}
+
+
+def _default_hf_cache_dir() -> Path:
+    """Return the default HuggingFace Hub cache directory.
+
+    Respects the ``HF_HOME`` and ``HF_HUB_CACHE`` environment variables used
+    by the ``huggingface_hub`` library.  Falls back to ``~/.cache/huggingface/hub``.
+    """
+    if env := os.environ.get("HF_HUB_CACHE"):
+        return Path(env)
+    hf_home = os.environ.get("HF_HOME", os.path.join("~", ".cache", "huggingface"))
+    return Path(os.path.expanduser(os.path.join(hf_home, "hub")))
+
+
+def is_model_cached(
+    repo_id: str,
+    cache_dir: Path | str | None = None,
+) -> bool:
+    """Check whether a HuggingFace model's weights are locally cached.
+
+    Looks for ``.safetensors`` files inside the model's snapshot directory.
+    A directory that exists but contains only metadata (no weight files) is
+    treated as *not* cached.
+
+    Args:
+        repo_id: HuggingFace repo ID (e.g. ``"black-forest-labs/FLUX.2-klein-4B"``).
+        cache_dir: Override for the HF Hub cache directory. Defaults to the
+            standard HuggingFace cache location.
+
+    Returns:
+        ``True`` if the model directory exists and contains at least one
+        ``.safetensors`` file, ``False`` otherwise.
+    """
+    if cache_dir is None:
+        cache_dir = _default_hf_cache_dir()
+    else:
+        cache_dir = Path(cache_dir)
+
+    # HF Hub stores repos in dirs named models--{org}--{model}
+    dir_name = "models--" + repo_id.replace("/", "--")
+    model_dir = cache_dir / dir_name
+
+    if not model_dir.is_dir():
+        return False
+
+    # Walk the snapshots directory looking for .safetensors weight files.
+    # We avoid walking blobs (which are content-addressed and lack extensions)
+    # to keep the check fast and unambiguous.
+    snapshots_dir = model_dir / "snapshots"
+    if not snapshots_dir.is_dir():
+        return False
+
+    for _root, _dirs, files in os.walk(snapshots_dir):
+        for f in files:
+            if f.endswith(".safetensors"):
+                return True
+
+    return False
 
 
 class ModelCache:
