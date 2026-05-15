@@ -167,7 +167,7 @@ def is_model_cached(
 
 
 class ModelCache:
-    """Thread-safe lazy model cache keyed by (model_name, quantize).
+    """Thread-safe lazy model cache keyed by (model_name, quantize, lora_style).
 
     Usage::
 
@@ -181,7 +181,7 @@ class ModelCache:
     _REGISTRY = _build_registry()
 
     def __init__(self) -> None:
-        self._cache: dict[tuple[str, int | None], Any] = {}
+        self._cache: dict[tuple[str, int | None, str | None], Any] = {}
         self._lock = threading.Lock()
         self._imports: dict[str, Any] | None = None
         self._imports_lock = threading.Lock()
@@ -199,21 +199,30 @@ class ModelCache:
         """Return list of supported model names."""
         return list(self._REGISTRY.keys())
 
-    def get_model(self, model_name: str, quantize: int | None = None) -> Any:
+    def get_model(
+        self,
+        model_name: str,
+        quantize: int | None = None,
+        lora_style: str | None = None,
+    ) -> Any:
         """Get or lazily load a cached model instance.
 
         Args:
             model_name: Model name string (e.g. "schnell", "flux2-klein-4b").
             quantize: Quantization bit-width (4, 8, or None for full precision).
+            lora_style: Optional LoRA style name to apply. Valid values:
+                couple, font, home, identity, illustration, portrait, ppt,
+                sandstorm, sparklers, storyboard. Not supported by SeedVR2 models.
 
         Returns:
             The loaded model instance.
 
         Raises:
-            ValueError: If model_name is not in the registry.
+            ValueError: If model_name is not in the registry, or if lora_style
+                is provided for a model that does not support LoRA.
             RuntimeError: If the model fails to load.
         """
-        key = (model_name, quantize)
+        key = (model_name, quantize, lora_style)
 
         # Fast path: check cache without loading anything
         with self._lock:
@@ -229,14 +238,28 @@ class ModelCache:
 
         class_key, config_factory_name, supports_lora = self._REGISTRY[model_name]
 
+        # Reject lora_style for models that do not support LoRA
+        if lora_style is not None and not supports_lora:
+            raise ValueError(
+                f"Model '{model_name}' does not support LoRA. "
+                f"lora_style cannot be used with SeedVR2 models."
+            )
+
         # Get lazily-imported classes
         imports = self._get_imports()
         model_cls = imports[class_key]
         model_config_cls = imports["ModelConfig"]
         config_factory = getattr(model_config_cls, config_factory_name)
 
+        # Resolve LoRA path if a style was requested (lazy import to keep startup fast)
+        lora_kwargs: dict[str, Any] = {}
+        if lora_style is not None:
+            from mflux.models.flux.variants.in_context.utils.in_context_loras import get_lora_path
+            lora_path = get_lora_path(lora_style)
+            lora_kwargs = {"lora_paths": [lora_path], "lora_scales": [1.0]}
+
         try:
-            model = model_cls(quantize=quantize, model_config=config_factory())
+            model = model_cls(quantize=quantize, model_config=config_factory(), **lora_kwargs)
         except Exception as e:
             raise RuntimeError(
                 f"Failed to load model '{model_name}' with quantize={quantize}: {e}"

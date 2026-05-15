@@ -104,7 +104,7 @@ class TestGenerateImageHappyPath:
 
         generate_image(prompt="test", model="schnell", quantize=4)
 
-        mock_get_model.assert_called_once_with("schnell", quantize=4)
+        mock_get_model.assert_called_once_with("schnell", quantize=4, lora_style=None)
 
     @patch.object(cache, "get_model")
     def test_passes_params_to_model_generate(self, mock_get_model):
@@ -282,7 +282,7 @@ class TestEditImageHappyPath:
             quantize=4,
         )
 
-        mock_get_model.assert_called_once_with("fibo-edit", quantize=4)
+        mock_get_model.assert_called_once_with("fibo-edit", quantize=4, lora_style=None)
 
     @patch.object(cache, "get_model")
     def test_flux2_klein_edit_passes_image_paths_list(self, mock_get_model):
@@ -1039,3 +1039,68 @@ class TestEditImageOutputPath:
         result = edit_image(image_paths=["input.jpg"], prompt="test", output_path=out)
 
         assert os.path.isabs(result)
+
+
+# ---------------------------------------------------------------------------
+# lora_style parameter tests
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateImageLoraStyle:
+    """Tests for the lora_style parameter on generate_image."""
+
+    def _make_mock_model(self, width=64, height=64):
+        mock_pil_image = PIL.Image.new("RGB", (width, height), color="red")
+        mock_generated = MagicMock()
+        mock_generated.image = mock_pil_image
+        mock_model = MagicMock()
+        mock_model.generate_image.return_value = mock_generated
+        return mock_model
+
+    @patch.object(cache, "get_model")
+    def test_lora_style_passed_to_get_model(self, mock_get_model):
+        """lora_style should be forwarded to cache.get_model."""
+        mock_get_model.return_value = self._make_mock_model()
+
+        generate_image(prompt="x", lora_style="portrait")
+
+        mock_get_model.assert_called_once_with("flux2-klein-4b", quantize=8, lora_style="portrait")
+
+    @patch.object(cache, "get_model")
+    def test_no_lora_style_default(self, mock_get_model):
+        """When lora_style is omitted, None should be passed to cache.get_model."""
+        mock_get_model.return_value = self._make_mock_model()
+
+        generate_image(prompt="x")
+
+        mock_get_model.assert_called_once_with("flux2-klein-4b", quantize=8, lora_style=None)
+
+
+class TestEditImageLoraStyle:
+    """Tests for the lora_style parameter on edit_image."""
+
+    def _make_mock_model(self, width=64, height=64):
+        mock_pil_image = PIL.Image.new("RGB", (width, height), color="blue")
+        mock_generated = MagicMock()
+        mock_generated.image = mock_pil_image
+        mock_model = MagicMock()
+        mock_model.generate_image.return_value = mock_generated
+        return mock_model
+
+    @patch.object(cache, "get_model")
+    def test_lora_style_passed_to_get_model(self, mock_get_model):
+        """lora_style should be forwarded to cache.get_model for edit_image."""
+        mock_get_model.return_value = self._make_mock_model()
+
+        edit_image(image_paths=["img.png"], prompt="x", lora_style="portrait")
+
+        mock_get_model.assert_called_once_with("flux2-klein-edit", quantize=8, lora_style="portrait")
+
+    @patch.object(cache, "get_model")
+    def test_no_lora_style_default(self, mock_get_model):
+        """When lora_style is omitted, None should be passed to cache.get_model."""
+        mock_get_model.return_value = self._make_mock_model()
+
+        edit_image(image_paths=["img.png"], prompt="x")
+
+        mock_get_model.assert_called_once_with("flux2-klein-edit", quantize=8, lora_style=None)

@@ -212,3 +212,101 @@ class TestModelCacheLazyImport:
         cache = ModelCache()
         _ = cache.supported_models
         assert cache._imports is None
+
+
+class TestModelCacheLoraStyle:
+    """Tests for lora_style parameter in get_model."""
+
+    def _make_cache_with_mock(self):
+        """Create a ModelCache with mocked imports."""
+        cache = ModelCache()
+
+        mock_model_config = MagicMock()
+        for method_name in [
+            "schnell", "dev", "flux2_klein_4b", "flux2_klein_9b",
+            "flux2_klein_base_4b", "flux2_klein_base_9b",
+            "z_image", "z_image_turbo", "fibo", "fibo_lite",
+            "fibo_edit", "fibo_edit_rmbg", "qwen_image",
+            "qwen_image_edit", "seedvr2_3b", "seedvr2_7b",
+        ]:
+            getattr(mock_model_config, method_name).return_value = MagicMock(
+                name=f"config_{method_name}"
+            )
+
+        mock_imports = {
+            "Flux1": MagicMock(name="Flux1", side_effect=lambda **kw: MagicMock()),
+            "Flux2Klein": MagicMock(name="Flux2Klein", side_effect=lambda **kw: MagicMock()),
+            "Flux2KleinEdit": MagicMock(name="Flux2KleinEdit", side_effect=lambda **kw: MagicMock()),
+            "ZImage": MagicMock(name="ZImage", side_effect=lambda **kw: MagicMock()),
+            "FIBO": MagicMock(name="FIBO", side_effect=lambda **kw: MagicMock()),
+            "FIBOEdit": MagicMock(name="FIBOEdit", side_effect=lambda **kw: MagicMock()),
+            "QwenImage": MagicMock(name="QwenImage", side_effect=lambda **kw: MagicMock()),
+            "QwenImageEdit": MagicMock(name="QwenImageEdit", side_effect=lambda **kw: MagicMock()),
+            "SeedVR2": MagicMock(name="SeedVR2", side_effect=lambda **kw: MagicMock()),
+            "ModelConfig": mock_model_config,
+        }
+        cache._imports = mock_imports
+        return cache, mock_imports
+
+    def test_lora_style_cache_key_includes_style(self):
+        """Cache should distinguish (model, quantize, style) from (model, quantize, None)."""
+        with patch(
+            "mflux.models.flux.variants.in_context.utils.in_context_loras.get_lora_path",
+            return_value="ali-vilab/In-Context-LoRA:portrait-photography.safetensors",
+        ):
+            cache, mocks = self._make_cache_with_mock()
+
+            # First call with lora_style — loads model
+            model1 = cache.get_model("flux2-klein-4b", lora_style="portrait")
+            # Second call with same lora_style — should be a cache hit
+            model2 = cache.get_model("flux2-klein-4b", lora_style="portrait")
+
+            assert model1 is model2
+            # Constructor should only have been called once (cache hit on second call)
+            assert mocks["Flux2Klein"].call_count == 1
+
+    def test_lora_style_calls_get_lora_path(self):
+        """get_lora_path should be called with the style name and its result used in kwargs."""
+        lora_path = "ali-vilab/In-Context-LoRA:portrait-photography.safetensors"
+        with patch(
+            "mflux.models.flux.variants.in_context.utils.in_context_loras.get_lora_path",
+            return_value=lora_path,
+        ) as mock_get_lora:
+            cache, mocks = self._make_cache_with_mock()
+            # Override side_effect to capture kwargs
+            captured_kwargs = {}
+
+            def capture_kwargs(**kw):
+                captured_kwargs.update(kw)
+                return MagicMock()
+
+            mocks["Flux2Klein"].side_effect = capture_kwargs
+
+            cache.get_model("flux2-klein-4b", lora_style="portrait")
+
+            mock_get_lora.assert_called_once_with("portrait")
+            assert captured_kwargs.get("lora_paths") == [lora_path]
+            assert captured_kwargs.get("lora_scales") == [1.0]
+
+    def test_seedvr2_rejects_lora_style(self):
+        """SeedVR2 models should raise ValueError when lora_style is provided."""
+        cache, _ = self._make_cache_with_mock()
+
+        with pytest.raises(ValueError, match="does not support LoRA"):
+            cache.get_model("seedvr2-3b", lora_style="portrait")
+
+    def test_lora_style_none_no_lora_args(self):
+        """When lora_style is None, lora_paths should NOT be passed to the model constructor."""
+        cache, mocks = self._make_cache_with_mock()
+        captured_kwargs = {}
+
+        def capture_kwargs(**kw):
+            captured_kwargs.update(kw)
+            return MagicMock()
+
+        mocks["Flux2Klein"].side_effect = capture_kwargs
+
+        cache.get_model("flux2-klein-4b", lora_style=None)
+
+        assert "lora_paths" not in captured_kwargs
+        assert "lora_scales" not in captured_kwargs

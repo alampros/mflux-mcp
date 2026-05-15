@@ -24,6 +24,7 @@ def generate_image(
     seed: int | None = None,
     quantize: int = 8,
     output_path: str | None = None,
+    lora_style: str | None = None,
 ) -> Image | str:
     """Generate an image from a text prompt using mflux.
 
@@ -39,6 +40,9 @@ def generate_image(
             parent directories are created automatically and the absolute path
             is returned as a string. When omitted, raw image bytes are returned
             via the FastMCP Image type.
+        lora_style: Optional LoRA style to apply. Valid values: couple, font,
+            home, identity, illustration, portrait, ppt, sandstorm, sparklers,
+            storyboard.
 
     Returns:
         FastMCP Image when output_path is None, otherwise the absolute file
@@ -47,7 +51,7 @@ def generate_image(
     if seed is None:
         seed = random.randint(0, 2**32 - 1)
 
-    loaded_model = cache.get_model(model, quantize=quantize)
+    loaded_model = cache.get_model(model, quantize=quantize, lora_style=lora_style)
 
     result = loaded_model.generate_image(
         seed=seed,
@@ -82,6 +86,7 @@ def edit_image(
     seed: int | None = None,
     quantize: int = 8,
     output_path: str | None = None,
+    lora_style: str | None = None,
 ) -> Image | str:
     """Edit an image using an mflux edit model.
 
@@ -101,6 +106,9 @@ def edit_image(
             parent directories are created automatically and the absolute path
             is returned as a string. When omitted, raw image bytes are returned
             via the FastMCP Image type.
+        lora_style: Optional LoRA style to apply. Valid values: couple, font,
+            home, identity, illustration, portrait, ppt, sandstorm, sparklers,
+            storyboard.
 
     Returns:
         FastMCP Image when output_path is None, otherwise the absolute file
@@ -115,7 +123,7 @@ def edit_image(
     if seed is None:
         seed = random.randint(0, 2**32 - 1)
 
-    loaded_model = cache.get_model(model, quantize=quantize)
+    loaded_model = cache.get_model(model, quantize=quantize, lora_style=lora_style)
 
     # FIBOEdit takes a singular image_path argument, while Flux2KleinEdit
     # and QwenImageEdit accept a plural image_paths list.
