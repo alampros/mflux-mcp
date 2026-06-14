@@ -6,6 +6,7 @@ MLX models or performing actual GPU inference.
 
 import io
 import os
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import PIL.Image
@@ -1347,3 +1348,118 @@ class TestProgressNotifications:
         gen_tool = next(t for t in tools if t.name == "generate_image")
         schema_props = gen_tool.parameters.get("properties", {})
         assert "ctx" not in schema_props
+
+
+class TestHeartbeatProgress:
+    """Tests for periodic heartbeat progress during inference."""
+
+    async def test_generate_heartbeat_sends_progress_during_slow_inference(
+        self, monkeypatch
+    ):
+        """Heartbeat sends ctx.report_progress multiple times during slow inference."""
+        import server as server_module
+
+        monkeypatch.setattr(server_module, "HEARTBEAT_INTERVAL", 0.1)
+
+        ctx = AsyncMock()
+
+        def slow_generate(**kwargs):
+            time.sleep(0.5)
+            mock_result = MagicMock()
+            mock_result.image = MagicMock()
+            return mock_result
+
+        mock_model = MagicMock()
+        mock_model.generate_image.side_effect = slow_generate
+
+        with patch.object(cache, "get_model", return_value=mock_model):
+            await generate_image(prompt="test", output_path=None, ctx=ctx)
+
+        # Should have the initial "generating" stage plus heartbeat calls
+        generating_calls = [
+            c
+            for c in ctx.report_progress.call_args_list
+            if len(c.args) >= 3 and c.args[0] == 2 and c.args[1] == 4
+        ]
+        # At least the initial "generating" + 2 heartbeats for 0.5s / 0.1s interval
+        assert len(generating_calls) >= 3, (
+            f"Expected at least 3 generating-stage progress calls, got {len(generating_calls)}: {generating_calls}"
+        )
+
+    async def test_edit_heartbeat_sends_progress_during_slow_inference(
+        self, monkeypatch
+    ):
+        """Heartbeat sends ctx.report_progress multiple times during slow edit inference."""
+        import server as server_module
+
+        monkeypatch.setattr(server_module, "HEARTBEAT_INTERVAL", 0.1)
+
+        ctx = AsyncMock()
+
+        def slow_generate(**kwargs):
+            time.sleep(0.5)
+            mock_result = MagicMock()
+            mock_result.image = MagicMock()
+            return mock_result
+
+        mock_model = MagicMock()
+        mock_model.generate_image.side_effect = slow_generate
+
+        with patch.object(cache, "get_model", return_value=mock_model):
+            await edit_image(
+                image_paths=["/tmp/test.png"],
+                prompt="test",
+                output_path=None,
+                ctx=ctx,
+            )
+
+        generating_calls = [
+            c
+            for c in ctx.report_progress.call_args_list
+            if len(c.args) >= 3 and c.args[0] == 2 and c.args[1] == 4
+        ]
+        assert len(generating_calls) >= 3
+
+    async def test_heartbeat_skipped_when_ctx_is_none(self):
+        """Inference completes normally with no errors when ctx is None."""
+        mock_model = MagicMock()
+        mock_result = MagicMock()
+        mock_result.image = MagicMock()
+        mock_model.generate_image.return_value = mock_result
+
+        with patch.object(cache, "get_model", return_value=mock_model):
+            # Should not raise — ctx=None by default
+            result = await generate_image(prompt="test", output_path=None)
+        assert result is not None
+
+    async def test_heartbeat_message_includes_elapsed_time(self, monkeypatch):
+        """Heartbeat messages include elapsed time."""
+        import server as server_module
+
+        monkeypatch.setattr(server_module, "HEARTBEAT_INTERVAL", 0.1)
+
+        ctx = AsyncMock()
+
+        def slow_generate(**kwargs):
+            time.sleep(0.35)
+            mock_result = MagicMock()
+            mock_result.image = MagicMock()
+            return mock_result
+
+        mock_model = MagicMock()
+        mock_model.generate_image.side_effect = slow_generate
+
+        with patch.object(cache, "get_model", return_value=mock_model):
+            await generate_image(prompt="test", output_path=None, ctx=ctx)
+
+        # Find heartbeat calls (those with elapsed time in the message)
+        heartbeat_calls = [
+            c
+            for c in ctx.report_progress.call_args_list
+            if len(c.args) >= 3
+            and isinstance(c.args[2], str)
+            and "elapsed:" in c.args[2]
+        ]
+        assert len(heartbeat_calls) >= 1, (
+            f"Expected heartbeat calls with elapsed time, got: {ctx.report_progress.call_args_list}"
+        )
