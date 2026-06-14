@@ -7,16 +7,19 @@ import random
 
 from fastmcp import Context, FastMCP
 from fastmcp.utilities.types import Image
+from huggingface_hub.errors import GatedRepoError
 from mflux.utils.metadata_reader import MetadataReader
 
 from mflux_cache import ModelCache, _REPO_MAP, is_model_cached
+
+INFERENCE_TIMEOUT = 300.0  # seconds — timeout for model inference tools
 
 mcp = FastMCP("mflux-mcp")
 cache = ModelCache()
 _inference_lock = asyncio.Semaphore(1)
 
 
-@mcp.tool()
+@mcp.tool(timeout=INFERENCE_TIMEOUT)
 async def generate_image(
     prompt: str,
     model: str = "flux2-klein-4b",
@@ -60,7 +63,21 @@ async def generate_image(
     async with _inference_lock:
         if ctx is not None:
             await ctx.report_progress(1, 4, "loading model")
-        loaded_model = cache.get_model(model, quantize=quantize, lora_style=lora_style)
+        try:
+            loaded_model = cache.get_model(
+                model, quantize=quantize, lora_style=lora_style
+            )
+        except GatedRepoError:
+            _, config_factory_name, _ = ModelCache._REGISTRY[model]
+            repo_id = _REPO_MAP.get(config_factory_name, model)
+            raise RuntimeError(
+                f"Model '{model}' requires access to a gated HuggingFace repository.\n\n"
+                f"To resolve this:\n"
+                f"1. Visit https://huggingface.co/{repo_id} and request access\n"
+                f"2. Authenticate locally by running: huggingface-cli login\n"
+                f"   Or set the HF_TOKEN environment variable with your access token\n"
+                f"3. Retry the operation"
+            )
 
         if ctx is not None:
             await ctx.report_progress(2, 4, "generating")
@@ -91,7 +108,7 @@ async def generate_image(
         return Image(data=image_bytes, format="png")
 
 
-@mcp.tool()
+@mcp.tool(timeout=INFERENCE_TIMEOUT)
 async def edit_image(
     image_paths: list[str],
     prompt: str,
@@ -144,7 +161,21 @@ async def edit_image(
     async with _inference_lock:
         if ctx is not None:
             await ctx.report_progress(1, 4, "loading model")
-        loaded_model = cache.get_model(model, quantize=quantize, lora_style=lora_style)
+        try:
+            loaded_model = cache.get_model(
+                model, quantize=quantize, lora_style=lora_style
+            )
+        except GatedRepoError:
+            _, config_factory_name, _ = ModelCache._REGISTRY[model]
+            repo_id = _REPO_MAP.get(config_factory_name, model)
+            raise RuntimeError(
+                f"Model '{model}' requires access to a gated HuggingFace repository.\n\n"
+                f"To resolve this:\n"
+                f"1. Visit https://huggingface.co/{repo_id} and request access\n"
+                f"2. Authenticate locally by running: huggingface-cli login\n"
+                f"   Or set the HF_TOKEN environment variable with your access token\n"
+                f"3. Retry the operation"
+            )
 
         if ctx is not None:
             await ctx.report_progress(2, 4, "generating")
@@ -232,17 +263,23 @@ def list_models() -> list[dict]:
             - is_downloaded: Whether the model weights are locally cached.
     """
     models: list[dict] = []
-    for name, (class_key, config_factory_name, supports_lora) in ModelCache._REGISTRY.items():
+    for name, (
+        class_key,
+        config_factory_name,
+        supports_lora,
+    ) in ModelCache._REGISTRY.items():
         repo_id = _REPO_MAP.get(config_factory_name)
         downloaded = is_model_cached(repo_id) if repo_id else False
-        models.append({
-            "name": name,
-            "family": _FAMILY_MAP[class_key],
-            "capability": _CAPABILITY_MAP[class_key],
-            "supports_lora": supports_lora,
-            "quantize_options": [4, 8, None],
-            "is_downloaded": downloaded,
-        })
+        models.append(
+            {
+                "name": name,
+                "family": _FAMILY_MAP[class_key],
+                "capability": _CAPABILITY_MAP[class_key],
+                "supports_lora": supports_lora,
+                "quantize_options": [4, 8, None],
+                "is_downloaded": downloaded,
+            }
+        )
     return models
 
 
@@ -270,7 +307,10 @@ def get_image_metadata(image_path: str) -> dict:
     metadata = MetadataReader.read_all_metadata(image_path)
 
     if not metadata.get("exif") and not metadata.get("xmp"):
-        return {"message": "No mflux metadata found in this image.", "image_path": image_path}
+        return {
+            "message": "No mflux metadata found in this image.",
+            "image_path": image_path,
+        }
 
     return metadata
 

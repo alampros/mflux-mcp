@@ -11,6 +11,8 @@ import threading
 from pathlib import Path
 from typing import Any, Callable
 
+from huggingface_hub.errors import GatedRepoError
+
 
 def _lazy_imports() -> dict[str, Any]:
     """Import mflux model classes lazily to avoid heavy import at module load time."""
@@ -254,12 +256,19 @@ class ModelCache:
         # Resolve LoRA path if a style was requested (lazy import to keep startup fast)
         lora_kwargs: dict[str, Any] = {}
         if lora_style is not None:
-            from mflux.models.flux.variants.in_context.utils.in_context_loras import get_lora_path
+            from mflux.models.flux.variants.in_context.utils.in_context_loras import (
+                get_lora_path,
+            )
+
             lora_path = get_lora_path(lora_style)
             lora_kwargs = {"lora_paths": [lora_path], "lora_scales": [1.0]}
 
         try:
-            model = model_cls(quantize=quantize, model_config=config_factory(), **lora_kwargs)
+            model = model_cls(
+                quantize=quantize, model_config=config_factory(), **lora_kwargs
+            )
+        except GatedRepoError:
+            raise  # let it propagate to the tool layer for user-friendly messaging
         except Exception as e:
             raise RuntimeError(
                 f"Failed to load model '{model_name}' with quantize={quantize}: {e}"

@@ -11,8 +11,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import PIL.Image
 import pytest
 from fastmcp.utilities.types import Image
+from huggingface_hub.errors import GatedRepoError
 
-from server import mcp, generate_image, edit_image, list_models, get_image_metadata, cache, parse_args
+from server import (
+    mcp,
+    generate_image,
+    edit_image,
+    list_models,
+    get_image_metadata,
+    cache,
+    parse_args,
+)
 from mflux_cache import ModelCache, _REPO_MAP, is_model_cached, _default_hf_cache_dir
 
 
@@ -42,32 +51,38 @@ class TestGenerateImageDefaults:
 
     def test_default_model(self):
         import inspect
+
         sig = inspect.signature(generate_image)
         assert sig.parameters["model"].default == "flux2-klein-4b"
 
     def test_default_dimensions(self):
         import inspect
+
         sig = inspect.signature(generate_image)
         assert sig.parameters["width"].default == 1024
         assert sig.parameters["height"].default == 1024
 
     def test_default_steps(self):
         import inspect
+
         sig = inspect.signature(generate_image)
         assert sig.parameters["steps"].default == 4
 
     def test_default_seed_is_none(self):
         import inspect
+
         sig = inspect.signature(generate_image)
         assert sig.parameters["seed"].default is None
 
     def test_default_quantize(self):
         import inspect
+
         sig = inspect.signature(generate_image)
         assert sig.parameters["quantize"].default == 8
 
     def test_prompt_is_required(self):
         import inspect
+
         sig = inspect.signature(generate_image)
         assert sig.parameters["prompt"].default is inspect.Parameter.empty
 
@@ -206,6 +221,17 @@ class TestGenerateImageErrors:
         with pytest.raises(RuntimeError, match="MLX error"):
             await generate_image(prompt="test")
 
+    @patch.object(cache, "get_model")
+    async def test_gated_repo_error_returns_actionable_message(self, mock_get_model):
+        mock_get_model.side_effect = GatedRepoError("test", response=MagicMock())
+
+        with pytest.raises(RuntimeError, match="huggingface.co") as exc_info:
+            await generate_image(prompt="test", model="fibo-edit")
+
+        msg = str(exc_info.value)
+        assert "huggingface-cli login" in msg
+        assert "HF_TOKEN" in msg
+
 
 # ---------------------------------------------------------------------------
 # edit_image tests
@@ -217,31 +243,37 @@ class TestEditImageDefaults:
 
     def test_default_model(self):
         import inspect
+
         sig = inspect.signature(edit_image)
         assert sig.parameters["model"].default == "flux2-klein-edit"
 
     def test_default_steps(self):
         import inspect
+
         sig = inspect.signature(edit_image)
         assert sig.parameters["steps"].default == 4
 
     def test_default_seed_is_none(self):
         import inspect
+
         sig = inspect.signature(edit_image)
         assert sig.parameters["seed"].default is None
 
     def test_default_quantize(self):
         import inspect
+
         sig = inspect.signature(edit_image)
         assert sig.parameters["quantize"].default == 8
 
     def test_image_paths_is_required(self):
         import inspect
+
         sig = inspect.signature(edit_image)
         assert sig.parameters["image_paths"].default is inspect.Parameter.empty
 
     def test_prompt_is_required(self):
         import inspect
+
         sig = inspect.signature(edit_image)
         assert sig.parameters["prompt"].default is inspect.Parameter.empty
 
@@ -422,7 +454,9 @@ class TestEditImageErrors:
         mock_get_model.side_effect = ValueError("Unknown model: 'bad-model'")
 
         with pytest.raises(ValueError, match="Unknown model"):
-            await edit_image(image_paths=["input.jpg"], prompt="test", model="bad-model")
+            await edit_image(
+                image_paths=["input.jpg"], prompt="test", model="bad-model"
+            )
 
     @patch.object(cache, "get_model")
     async def test_model_load_failure_raises_runtime_error(self, mock_get_model):
@@ -439,6 +473,19 @@ class TestEditImageErrors:
 
         with pytest.raises(RuntimeError, match="MLX error"):
             await edit_image(image_paths=["input.jpg"], prompt="test")
+
+    @patch.object(cache, "get_model")
+    async def test_gated_repo_error_returns_actionable_message(self, mock_get_model):
+        mock_get_model.side_effect = GatedRepoError("test", response=MagicMock())
+
+        with pytest.raises(RuntimeError, match="huggingface.co") as exc_info:
+            await edit_image(
+                image_paths=["input.jpg"], prompt="test", model="fibo-edit"
+            )
+
+        msg = str(exc_info.value)
+        assert "huggingface-cli login" in msg
+        assert "HF_TOKEN" in msg
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +521,14 @@ class TestListModels:
             assert isinstance(entry, dict)
 
     def test_each_entry_has_required_fields(self):
-        required_fields = {"name", "family", "capability", "supports_lora", "quantize_options", "is_downloaded"}
+        required_fields = {
+            "name",
+            "family",
+            "capability",
+            "supports_lora",
+            "quantize_options",
+            "is_downloaded",
+        }
         result = list_models()
         for entry in result:
             assert required_fields.issubset(entry.keys()), (
@@ -529,6 +583,7 @@ class TestListModels:
     def test_does_not_trigger_mflux_import(self):
         """list_models should only read the static _REGISTRY, not trigger mflux imports."""
         import sys
+
         # Remove mflux from sys.modules if present, to detect fresh imports
         mflux_modules = [k for k in sys.modules if k.startswith("mflux.")]
         for mod in mflux_modules:
@@ -569,7 +624,9 @@ class TestIsModelCached:
         (transformer_dir / "config.json").write_text("{}")
 
         if with_safetensors:
-            (transformer_dir / "diffusion_pytorch_model.safetensors").write_bytes(b"\x00" * 100)
+            (transformer_dir / "diffusion_pytorch_model.safetensors").write_bytes(
+                b"\x00" * 100
+            )
 
         # Create blobs and refs dirs (realistic structure)
         (model_dir / "blobs").mkdir(exist_ok=True)
@@ -579,7 +636,9 @@ class TestIsModelCached:
 
     def test_returns_true_for_fully_cached_model(self, tmp_path):
         """A model with .safetensors files should be detected as cached."""
-        cache_dir = self._make_cached_model(tmp_path, "org/my-model", with_safetensors=True)
+        cache_dir = self._make_cached_model(
+            tmp_path, "org/my-model", with_safetensors=True
+        )
         assert is_model_cached("org/my-model", cache_dir=cache_dir) is True
 
     def test_returns_false_for_missing_model(self, tmp_path):
@@ -588,7 +647,9 @@ class TestIsModelCached:
 
     def test_returns_false_for_partial_download(self, tmp_path):
         """A model dir with metadata but no .safetensors should return False."""
-        cache_dir = self._make_cached_model(tmp_path, "org/partial-model", with_safetensors=False)
+        cache_dir = self._make_cached_model(
+            tmp_path, "org/partial-model", with_safetensors=False
+        )
         assert is_model_cached("org/partial-model", cache_dir=cache_dir) is False
 
     def test_returns_false_for_empty_dir(self, tmp_path):
@@ -619,12 +680,18 @@ class TestIsModelCached:
 
     def test_repo_id_with_special_chars(self, tmp_path):
         """Repo IDs with dots and hyphens should map correctly to cache dirs."""
-        cache_dir = self._make_cached_model(tmp_path, "black-forest-labs/FLUX.2-klein-4B")
-        assert is_model_cached("black-forest-labs/FLUX.2-klein-4B", cache_dir=cache_dir) is True
+        cache_dir = self._make_cached_model(
+            tmp_path, "black-forest-labs/FLUX.2-klein-4B"
+        )
+        assert (
+            is_model_cached("black-forest-labs/FLUX.2-klein-4B", cache_dir=cache_dir)
+            is True
+        )
 
     def test_does_not_load_model_weights(self, tmp_path):
         """Calling is_model_cached should not import mflux or load models."""
         import sys
+
         mflux_before = set(k for k in sys.modules if k.startswith("mflux."))
 
         cache_dir = self._make_cached_model(tmp_path, "org/test-model")
@@ -632,7 +699,9 @@ class TestIsModelCached:
 
         mflux_after = set(k for k in sys.modules if k.startswith("mflux."))
         new_imports = mflux_after - mflux_before
-        assert new_imports == set(), f"is_model_cached triggered mflux imports: {new_imports}"
+        assert new_imports == set(), (
+            f"is_model_cached triggered mflux imports: {new_imports}"
+        )
 
 
 class TestRepoMap:
@@ -640,7 +709,11 @@ class TestRepoMap:
 
     def test_repo_map_covers_all_registry_config_factories(self):
         """Every config_factory_name in _REGISTRY should have an entry in _REPO_MAP."""
-        for name, (_class_key, config_factory_name, _lora) in ModelCache._REGISTRY.items():
+        for name, (
+            _class_key,
+            config_factory_name,
+            _lora,
+        ) in ModelCache._REGISTRY.items():
             assert config_factory_name in _REPO_MAP, (
                 f"Model '{name}' uses config factory '{config_factory_name}' "
                 f"which is missing from _REPO_MAP"
@@ -667,6 +740,7 @@ class TestDefaultHfCacheDir:
     def test_default_path_ends_with_hub(self):
         """Default cache dir should end with 'hub'."""
         from pathlib import Path
+
         result = _default_hf_cache_dir()
         assert result.name == "hub"
 
@@ -674,6 +748,7 @@ class TestDefaultHfCacheDir:
     def test_respects_hf_hub_cache_env(self):
         """HF_HUB_CACHE env var should override the default."""
         from pathlib import Path
+
         result = _default_hf_cache_dir()
         assert result == Path("/custom/cache/path")
 
@@ -681,6 +756,7 @@ class TestDefaultHfCacheDir:
     def test_respects_hf_home_env(self):
         """HF_HOME env var should be used when HF_HUB_CACHE is not set."""
         from pathlib import Path
+
         # Make sure HF_HUB_CACHE isn't set
         env = os.environ.copy()
         env.pop("HF_HUB_CACHE", None)
@@ -718,9 +794,11 @@ class TestListModelsDownloadStatus:
     @patch("server.is_model_cached")
     def test_mixed_cache_status(self, mock_cached):
         """When some models are cached and others aren't, is_downloaded reflects reality."""
+
         # Make only "schnell" appear cached
         def side_effect(repo_id):
             return repo_id == "black-forest-labs/FLUX.1-schnell"
+
         mock_cached.side_effect = side_effect
 
         result = list_models()
@@ -894,6 +972,7 @@ class TestGenerateImageOutputPath:
 
     def test_output_path_default_is_none(self):
         import inspect
+
         sig = inspect.signature(generate_image)
         assert sig.parameters["output_path"].default is None
 
@@ -951,7 +1030,9 @@ class TestGenerateImageOutputPath:
         assert result == out
 
     @patch.object(cache, "get_model")
-    async def test_with_output_path_returns_absolute_path(self, mock_get_model, tmp_path):
+    async def test_with_output_path_returns_absolute_path(
+        self, mock_get_model, tmp_path
+    ):
         """Even if a relative path is given, the returned path should be absolute."""
         mock_get_model.return_value = self._make_mock_model()
         out = str(tmp_path / "output.png")
@@ -974,6 +1055,7 @@ class TestEditImageOutputPath:
 
     def test_output_path_default_is_none(self):
         import inspect
+
         sig = inspect.signature(edit_image)
         assert sig.parameters["output_path"].default is None
 
@@ -993,7 +1075,9 @@ class TestEditImageOutputPath:
         mock_get_model.return_value = self._make_mock_model()
         out = str(tmp_path / "edited.png")
 
-        result = await edit_image(image_paths=["input.jpg"], prompt="test", output_path=out)
+        result = await edit_image(
+            image_paths=["input.jpg"], prompt="test", output_path=out
+        )
 
         assert isinstance(result, str)
         assert result == out
@@ -1025,18 +1109,24 @@ class TestEditImageOutputPath:
         mock_get_model.return_value = self._make_mock_model()
         out = str(tmp_path / "nested" / "deep" / "edited.png")
 
-        result = await edit_image(image_paths=["input.jpg"], prompt="test", output_path=out)
+        result = await edit_image(
+            image_paths=["input.jpg"], prompt="test", output_path=out
+        )
 
         assert os.path.isfile(out)
         assert result == out
 
     @patch.object(cache, "get_model")
-    async def test_with_output_path_returns_absolute_path(self, mock_get_model, tmp_path):
+    async def test_with_output_path_returns_absolute_path(
+        self, mock_get_model, tmp_path
+    ):
         """Even if a relative path is given, the returned path should be absolute."""
         mock_get_model.return_value = self._make_mock_model()
         out = str(tmp_path / "edited.png")
 
-        result = await edit_image(image_paths=["input.jpg"], prompt="test", output_path=out)
+        result = await edit_image(
+            image_paths=["input.jpg"], prompt="test", output_path=out
+        )
 
         assert os.path.isabs(result)
 
@@ -1064,7 +1154,9 @@ class TestGenerateImageLoraStyle:
 
         await generate_image(prompt="x", lora_style="portrait")
 
-        mock_get_model.assert_called_once_with("flux2-klein-4b", quantize=8, lora_style="portrait")
+        mock_get_model.assert_called_once_with(
+            "flux2-klein-4b", quantize=8, lora_style="portrait"
+        )
 
     @patch.object(cache, "get_model")
     async def test_no_lora_style_default(self, mock_get_model):
@@ -1073,7 +1165,9 @@ class TestGenerateImageLoraStyle:
 
         await generate_image(prompt="x")
 
-        mock_get_model.assert_called_once_with("flux2-klein-4b", quantize=8, lora_style=None)
+        mock_get_model.assert_called_once_with(
+            "flux2-klein-4b", quantize=8, lora_style=None
+        )
 
 
 class TestEditImageLoraStyle:
@@ -1094,7 +1188,9 @@ class TestEditImageLoraStyle:
 
         await edit_image(image_paths=["img.png"], prompt="x", lora_style="portrait")
 
-        mock_get_model.assert_called_once_with("flux2-klein-edit", quantize=8, lora_style="portrait")
+        mock_get_model.assert_called_once_with(
+            "flux2-klein-edit", quantize=8, lora_style="portrait"
+        )
 
     @patch.object(cache, "get_model")
     async def test_no_lora_style_default(self, mock_get_model):
@@ -1103,7 +1199,9 @@ class TestEditImageLoraStyle:
 
         await edit_image(image_paths=["img.png"], prompt="x")
 
-        mock_get_model.assert_called_once_with("flux2-klein-edit", quantize=8, lora_style=None)
+        mock_get_model.assert_called_once_with(
+            "flux2-klein-edit", quantize=8, lora_style=None
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1118,30 +1216,35 @@ class TestInferenceLock:
         """_inference_lock is a Semaphore with value 1."""
         import asyncio
         from server import _inference_lock
+
         assert isinstance(_inference_lock, asyncio.Semaphore)
 
     def test_list_models_does_not_use_lock(self):
         """list_models is a plain sync function (not async)."""
         import inspect
         from server import list_models
+
         assert not inspect.iscoroutinefunction(list_models)
 
     def test_get_image_metadata_does_not_use_lock(self):
         """get_image_metadata is a plain sync function (not async)."""
         import inspect
         from server import get_image_metadata
+
         assert not inspect.iscoroutinefunction(get_image_metadata)
 
     def test_generate_image_is_async(self):
         """generate_image is a coroutine function."""
         import inspect
         from server import generate_image
+
         assert inspect.iscoroutinefunction(generate_image)
 
     def test_edit_image_is_async(self):
         """edit_image is a coroutine function."""
         import inspect
         from server import edit_image
+
         assert inspect.iscoroutinefunction(edit_image)
 
     async def test_concurrent_generate_image_serialized(self):
@@ -1168,6 +1271,7 @@ class TestInferenceLock:
     def test_lock_not_acquired_after_list_models(self):
         """After calling list_models, _inference_lock should still be free."""
         from server import _inference_lock
+
         list_models()
         assert not _inference_lock.locked()
 
@@ -1175,6 +1279,7 @@ class TestInferenceLock:
         """_inference_lock is a module-level asyncio.Semaphore accessible from server."""
         import asyncio
         import server
+
         assert isinstance(server._inference_lock, asyncio.Semaphore)
 
 
@@ -1218,8 +1323,15 @@ class TestProgressNotifications:
         mock_model = MagicMock()
         mock_model.generate_image.return_value = MagicMock(image=MagicMock())
         with patch.object(cache, "get_model", return_value=mock_model):
-            await edit_image(image_paths=["img.png"], prompt="test", output_path=None, ctx=ctx)
-        for stage, label in [(0, "queued"), (1, "loading model"), (2, "generating"), (3, "saving")]:
+            await edit_image(
+                image_paths=["img.png"], prompt="test", output_path=None, ctx=ctx
+            )
+        for stage, label in [
+            (0, "queued"),
+            (1, "loading model"),
+            (2, "generating"),
+            (3, "saving"),
+        ]:
             ctx.report_progress.assert_any_call(stage, 4, label)
 
     async def test_generate_image_no_ctx_does_not_crash(self):
