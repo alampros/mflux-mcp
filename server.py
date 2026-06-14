@@ -1,9 +1,12 @@
 """mflux-mcp — MCP server exposing mflux image generation to LLM agents."""
 
 import asyncio
+import concurrent.futures
+import functools
 import io
 import os
 import random
+import time
 
 from fastmcp import Context, FastMCP
 from fastmcp.utilities.types import Image
@@ -13,10 +16,71 @@ from mflux.utils.metadata_reader import MetadataReader
 from mflux_cache import ModelCache, _REPO_MAP, is_model_cached
 
 INFERENCE_TIMEOUT = 300.0  # seconds — timeout for model inference tools
+HEARTBEAT_INTERVAL = 10.0  # seconds — interval for progress heartbeats during inference
 
 mcp = FastMCP("mflux-mcp")
 cache = ModelCache()
 _inference_lock = asyncio.Semaphore(1)
+
+# ---------------------------------------------------------------------------
+# Dedicated single-thread executor for all MLX GPU work.
+#
+# MLX binds ``Stream(gpu, 0)`` to the thread that first creates it.  If model
+# loading happens on thread A and inference on thread B, thread B has no GPU
+# stream and ``mx.eval`` raises:
+#     RuntimeError: There is no Stream(gpu, 0) in current thread.
+#
+# Pinning *all* MLX work (model loading + inference) to a single persistent
+# thread guarantees the stream is always available.
+# ---------------------------------------------------------------------------
+_mlx_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="mlx-gpu"
+)
+
+
+async def _run_on_mlx_thread(fn, *args, **kwargs):
+    """Run *fn* on the dedicated MLX GPU thread and return the result.
+
+    All MLX operations (model loading, inference, evaluation) must happen
+    on the same thread so they share a single ``Stream(gpu, 0)``.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _mlx_executor, functools.partial(fn, *args, **kwargs)
+    )
+
+
+async def _run_with_heartbeat(
+    blocking_fn,
+    kwargs: dict,
+    ctx,
+    stage_message: str,
+    progress_current: int = 2,
+    progress_total: int = 4,
+):
+    """Run a blocking callable on the MLX thread while sending periodic progress heartbeats.
+
+    Dispatches the blocking function to ``_mlx_executor`` and, if a FastMCP
+    context is available, sends progress notifications every HEARTBEAT_INTERVAL
+    seconds to keep the MCP client's timeout clock from expiring.
+    """
+    start = time.monotonic()
+    task = asyncio.ensure_future(_run_on_mlx_thread(blocking_fn, **kwargs))
+
+    if ctx is None:
+        return await task
+
+    while not task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=HEARTBEAT_INTERVAL)
+        except asyncio.TimeoutError:
+            elapsed = time.monotonic() - start
+            await ctx.report_progress(
+                progress_current,
+                progress_total,
+                f"{stage_message} (elapsed: {int(elapsed)}s)",
+            )
+    return task.result()
 
 
 @mcp.tool(timeout=INFERENCE_TIMEOUT)
@@ -64,8 +128,8 @@ async def generate_image(
         if ctx is not None:
             await ctx.report_progress(1, 4, "loading model")
         try:
-            loaded_model = cache.get_model(
-                model, quantize=quantize, lora_style=lora_style
+            loaded_model = await _run_on_mlx_thread(
+                cache.get_model, model, quantize=quantize, lora_style=lora_style
             )
         except GatedRepoError:
             _, config_factory_name, _ = ModelCache._REGISTRY[model]
@@ -81,13 +145,17 @@ async def generate_image(
 
         if ctx is not None:
             await ctx.report_progress(2, 4, "generating")
-        # TODO: per-step progress requires running inference in asyncio.to_thread() — mflux callbacks are sync and block the event loop
-        result = loaded_model.generate_image(
-            seed=seed,
-            prompt=prompt,
-            num_inference_steps=steps,
-            width=width,
-            height=height,
+        result = await _run_with_heartbeat(
+            loaded_model.generate_image,
+            kwargs=dict(
+                seed=seed,
+                prompt=prompt,
+                num_inference_steps=steps,
+                width=width,
+                height=height,
+            ),
+            ctx=ctx,
+            stage_message="generating",
         )
 
         if ctx is not None:
@@ -162,8 +230,8 @@ async def edit_image(
         if ctx is not None:
             await ctx.report_progress(1, 4, "loading model")
         try:
-            loaded_model = cache.get_model(
-                model, quantize=quantize, lora_style=lora_style
+            loaded_model = await _run_on_mlx_thread(
+                cache.get_model, model, quantize=quantize, lora_style=lora_style
             )
         except GatedRepoError:
             _, config_factory_name, _ = ModelCache._REGISTRY[model]
@@ -179,24 +247,27 @@ async def edit_image(
 
         if ctx is not None:
             await ctx.report_progress(2, 4, "generating")
-        # FIBOEdit takes a singular image_path argument, while Flux2KleinEdit
-        # and QwenImageEdit accept a plural image_paths list.
         class_key = ModelCache._REGISTRY[model][0]
-        # TODO: per-step progress requires running inference in asyncio.to_thread() — mflux callbacks are sync and block the event loop
         if class_key == "FIBOEdit":
-            result = loaded_model.generate_image(
+            inference_kwargs = dict(
                 seed=seed,
                 prompt=prompt,
                 image_path=image_paths[0],
                 num_inference_steps=steps,
             )
         else:
-            result = loaded_model.generate_image(
+            inference_kwargs = dict(
                 seed=seed,
                 prompt=prompt,
                 image_paths=image_paths,
                 num_inference_steps=steps,
             )
+        result = await _run_with_heartbeat(
+            loaded_model.generate_image,
+            kwargs=inference_kwargs,
+            ctx=ctx,
+            stage_message="generating",
+        )
 
         if ctx is not None:
             await ctx.report_progress(3, 4, "saving")
