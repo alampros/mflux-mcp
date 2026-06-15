@@ -6,6 +6,8 @@ import functools
 import io
 import os
 import random
+import sys
+import threading
 import time
 
 from fastmcp import Context, FastMCP
@@ -17,6 +19,12 @@ from mflux_cache import ModelCache, _REPO_MAP, is_model_cached
 
 INFERENCE_TIMEOUT = 300.0  # seconds — timeout for model inference tools
 HEARTBEAT_INTERVAL = 10.0  # seconds — interval for progress heartbeats during inference
+
+
+def _log(msg: str) -> None:
+    """Write a log line to stderr (stdout is the MCP protocol channel)."""
+    print(f"[mflux-mcp] {msg}", file=sys.stderr, flush=True)
+
 
 mcp = FastMCP("mflux-mcp")
 cache = ModelCache()
@@ -44,9 +52,53 @@ async def _run_on_mlx_thread(fn, *args, **kwargs):
     All MLX operations (model loading, inference, evaluation) must happen
     on the same thread so they share a single ``Stream(gpu, 0)``.
     """
+    fn_name = getattr(fn, "__qualname__", getattr(fn, "__name__", repr(fn)))
+    _log(f"mlx-dispatch {fn_name}")
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         _mlx_executor, functools.partial(fn, *args, **kwargs)
+    )
+
+
+def _heartbeat_thread_fn(
+    stop_event: threading.Event,
+    loop: asyncio.AbstractEventLoop,
+    ctx,
+    stage_message: str,
+    progress_current: int,
+    progress_total: int,
+    fn_name: str,
+):
+    """Send periodic heartbeats from a daemon thread.
+
+    Uses ``time.sleep`` (which releases the GIL) so heartbeats fire reliably
+    even if the asyncio event loop is slow to process callbacks.  Progress
+    notifications are scheduled on the event loop via
+    ``asyncio.run_coroutine_threadsafe``.
+    """
+    start = time.monotonic()
+    count = 0
+    _log(f"heartbeat thread started for {fn_name} (interval={HEARTBEAT_INTERVAL:.1f}s)")
+    while not stop_event.wait(timeout=HEARTBEAT_INTERVAL):
+        count += 1
+        elapsed = time.monotonic() - start
+        message = f"{stage_message} (elapsed: {int(elapsed)}s)"
+        _log(
+            f"heartbeat #{count} for {fn_name} — progress {progress_current}/{progress_total} {message!r}"
+        )
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                ctx.report_progress(progress_current, progress_total, message),
+                loop,
+            )
+            # Wait briefly for the event loop to process it; don't block forever
+            future.result(timeout=5.0)
+            _log(f"heartbeat #{count} for {fn_name} — sent successfully")
+        except Exception as exc:
+            _log(f"heartbeat #{count} for {fn_name} — report_progress FAILED: {exc}")
+    elapsed = time.monotonic() - start
+    _log(
+        f"heartbeat thread stopped for {fn_name} — {elapsed:.1f}s elapsed, {count} heartbeats sent"
     )
 
 
@@ -63,24 +115,45 @@ async def _run_with_heartbeat(
     Dispatches the blocking function to ``_mlx_executor`` and, if a FastMCP
     context is available, sends progress notifications every HEARTBEAT_INTERVAL
     seconds to keep the MCP client's timeout clock from expiring.
+
+    Uses a dedicated daemon thread with ``time.sleep`` for heartbeats so they
+    fire independently of the asyncio event loop's ability to process timer
+    callbacks.
     """
-    start = time.monotonic()
-    task = asyncio.ensure_future(_run_on_mlx_thread(blocking_fn, **kwargs))
+    fn_name = getattr(
+        blocking_fn, "__qualname__", getattr(blocking_fn, "__name__", repr(blocking_fn))
+    )
 
     if ctx is None:
-        return await task
+        _log(f"_run_with_heartbeat ctx=None — no heartbeats for {fn_name}")
+        return await _run_on_mlx_thread(blocking_fn, **kwargs)
 
-    while not task.done():
-        try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=HEARTBEAT_INTERVAL)
-        except asyncio.TimeoutError:
-            elapsed = time.monotonic() - start
-            await ctx.report_progress(
-                progress_current,
-                progress_total,
-                f"{stage_message} (elapsed: {int(elapsed)}s)",
-            )
-    return task.result()
+    _log(
+        f"_run_with_heartbeat starting for {fn_name} (interval={HEARTBEAT_INTERVAL:.1f}s)"
+    )
+    loop = asyncio.get_running_loop()
+    stop_event = threading.Event()
+    hb_thread = threading.Thread(
+        target=_heartbeat_thread_fn,
+        args=(
+            stop_event,
+            loop,
+            ctx,
+            stage_message,
+            progress_current,
+            progress_total,
+            fn_name,
+        ),
+        daemon=True,
+        name=f"heartbeat-{fn_name}",
+    )
+    hb_thread.start()
+    try:
+        result = await _run_on_mlx_thread(blocking_fn, **kwargs)
+    finally:
+        stop_event.set()
+        hb_thread.join(timeout=5.0)
+    return result
 
 
 @mcp.tool(timeout=INFERENCE_TIMEOUT)
@@ -120,6 +193,11 @@ async def generate_image(
     """
     if seed is None:
         seed = random.randint(0, 2**32 - 1)
+
+    _log(
+        f"generate_image [v3-heartbeat-thread] model={model} size={width}x{height} steps={steps} "
+        f"seed={seed} quantize={quantize} lora={lora_style} ctx={ctx is not None} prompt={prompt!r}"
+    )
 
     if ctx is not None:
         await ctx.report_progress(0, 4, "queued")
@@ -222,6 +300,11 @@ async def edit_image(
 
     if seed is None:
         seed = random.randint(0, 2**32 - 1)
+
+    _log(
+        f"edit_image [v3-heartbeat-thread] model={model} steps={steps} seed={seed} "
+        f"quantize={quantize} lora={lora_style} ctx={ctx is not None} images={image_paths} prompt={prompt!r}"
+    )
 
     if ctx is not None:
         await ctx.report_progress(0, 4, "queued")
