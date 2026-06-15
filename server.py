@@ -469,6 +469,29 @@ def get_image_metadata(image_path: str) -> dict:
     return metadata
 
 
+@mcp.tool()
+def clear_cache() -> dict:
+    """Clear all cached models and reclaim memory.
+
+    Removes all loaded model instances from the in-memory cache, freeing
+    unified memory on Apple Silicon. Use this when switching tasks or when
+    memory pressure is high.
+
+    Returns:
+        A dict containing:
+            - status: "ok" on success.
+            - models_cleared: Number of models that were cached before clearing.
+            - message: Human-readable summary.
+    """
+    count = cache.size
+    cache.clear()
+    return {
+        "status": "ok",
+        "models_cleared": count,
+        "message": f"Cleared {count} cached model(s).",
+    }
+
+
 def parse_args(argv: list[str] | None = None):
     """Parse CLI arguments for transport configuration.
 

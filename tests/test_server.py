@@ -20,6 +20,7 @@ from server import (
     edit_image,
     list_models,
     get_image_metadata,
+    clear_cache,
     cache,
     parse_args,
 )
@@ -1463,3 +1464,48 @@ class TestHeartbeatProgress:
         assert len(heartbeat_calls) >= 1, (
             f"Expected heartbeat calls with elapsed time, got: {ctx.report_progress.call_args_list}"
         )
+
+
+# ---------------------------------------------------------------------------
+# clear_cache tests
+# ---------------------------------------------------------------------------
+
+
+class TestClearCache:
+    """Tests for the clear_cache MCP tool."""
+
+    @pytest.mark.asyncio
+    async def test_clear_cache_registered(self):
+        """The clear_cache tool should be registered on the MCP server."""
+        tools = await mcp.list_tools()
+        tool_names = [t.name for t in tools]
+        assert "clear_cache" in tool_names
+
+    def test_returns_correct_structure(self):
+        """clear_cache should return a dict with status, models_cleared, message keys."""
+        result = clear_cache()
+        assert isinstance(result, dict)
+        assert set(result.keys()) == {"status", "models_cleared", "message"}
+
+    def test_reports_correct_count(self):
+        """clear_cache should report the number of models that were cached."""
+        # Pre-populate cache with mock entries
+        cache._cache[("model-a", 8, None)] = MagicMock()
+        cache._cache[("model-b", 4, None)] = MagicMock()
+        cache._cache[("model-c", None, None)] = MagicMock()
+        try:
+            result = clear_cache()
+            assert result["models_cleared"] == 3
+            assert "3" in result["message"]
+        finally:
+            cache.clear()
+
+    def test_empties_cache(self):
+        """clear_cache should empty the cache."""
+        cache._cache[("model-x", 8, None)] = MagicMock()
+        try:
+            assert cache.size == 1
+            clear_cache()
+            assert cache.size == 0
+        finally:
+            cache.clear()

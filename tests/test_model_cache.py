@@ -69,11 +69,22 @@ class TestModelCacheGetModel:
         mock_model_config = MagicMock()
         # Create distinct factory methods that return unique config objects
         for method_name in [
-            "schnell", "dev", "flux2_klein_4b", "flux2_klein_9b",
-            "flux2_klein_base_4b", "flux2_klein_base_9b",
-            "z_image", "z_image_turbo", "fibo", "fibo_lite",
-            "fibo_edit", "fibo_edit_rmbg", "qwen_image",
-            "qwen_image_edit", "seedvr2_3b", "seedvr2_7b",
+            "schnell",
+            "dev",
+            "flux2_klein_4b",
+            "flux2_klein_9b",
+            "flux2_klein_base_4b",
+            "flux2_klein_base_9b",
+            "z_image",
+            "z_image_turbo",
+            "fibo",
+            "fibo_lite",
+            "fibo_edit",
+            "fibo_edit_rmbg",
+            "qwen_image",
+            "qwen_image_edit",
+            "seedvr2_3b",
+            "seedvr2_7b",
         ]:
             getattr(mock_model_config, method_name).return_value = MagicMock(
                 name=f"config_{method_name}"
@@ -84,13 +95,23 @@ class TestModelCacheGetModel:
         # the same child mock by default).
         mock_imports = {
             "Flux1": MagicMock(name="Flux1", side_effect=lambda **kw: MagicMock()),
-            "Flux2Klein": MagicMock(name="Flux2Klein", side_effect=lambda **kw: MagicMock()),
-            "Flux2KleinEdit": MagicMock(name="Flux2KleinEdit", side_effect=lambda **kw: MagicMock()),
+            "Flux2Klein": MagicMock(
+                name="Flux2Klein", side_effect=lambda **kw: MagicMock()
+            ),
+            "Flux2KleinEdit": MagicMock(
+                name="Flux2KleinEdit", side_effect=lambda **kw: MagicMock()
+            ),
             "ZImage": MagicMock(name="ZImage", side_effect=lambda **kw: MagicMock()),
             "FIBO": MagicMock(name="FIBO", side_effect=lambda **kw: MagicMock()),
-            "FIBOEdit": MagicMock(name="FIBOEdit", side_effect=lambda **kw: MagicMock()),
-            "QwenImage": MagicMock(name="QwenImage", side_effect=lambda **kw: MagicMock()),
-            "QwenImageEdit": MagicMock(name="QwenImageEdit", side_effect=lambda **kw: MagicMock()),
+            "FIBOEdit": MagicMock(
+                name="FIBOEdit", side_effect=lambda **kw: MagicMock()
+            ),
+            "QwenImage": MagicMock(
+                name="QwenImage", side_effect=lambda **kw: MagicMock()
+            ),
+            "QwenImageEdit": MagicMock(
+                name="QwenImageEdit", side_effect=lambda **kw: MagicMock()
+            ),
             "SeedVR2": MagicMock(name="SeedVR2", side_effect=lambda **kw: MagicMock()),
             "ModelConfig": mock_model_config,
         }
@@ -223,11 +244,22 @@ class TestModelCacheLoraStyle:
 
         mock_model_config = MagicMock()
         for method_name in [
-            "schnell", "dev", "flux2_klein_4b", "flux2_klein_9b",
-            "flux2_klein_base_4b", "flux2_klein_base_9b",
-            "z_image", "z_image_turbo", "fibo", "fibo_lite",
-            "fibo_edit", "fibo_edit_rmbg", "qwen_image",
-            "qwen_image_edit", "seedvr2_3b", "seedvr2_7b",
+            "schnell",
+            "dev",
+            "flux2_klein_4b",
+            "flux2_klein_9b",
+            "flux2_klein_base_4b",
+            "flux2_klein_base_9b",
+            "z_image",
+            "z_image_turbo",
+            "fibo",
+            "fibo_lite",
+            "fibo_edit",
+            "fibo_edit_rmbg",
+            "qwen_image",
+            "qwen_image_edit",
+            "seedvr2_3b",
+            "seedvr2_7b",
         ]:
             getattr(mock_model_config, method_name).return_value = MagicMock(
                 name=f"config_{method_name}"
@@ -235,13 +267,23 @@ class TestModelCacheLoraStyle:
 
         mock_imports = {
             "Flux1": MagicMock(name="Flux1", side_effect=lambda **kw: MagicMock()),
-            "Flux2Klein": MagicMock(name="Flux2Klein", side_effect=lambda **kw: MagicMock()),
-            "Flux2KleinEdit": MagicMock(name="Flux2KleinEdit", side_effect=lambda **kw: MagicMock()),
+            "Flux2Klein": MagicMock(
+                name="Flux2Klein", side_effect=lambda **kw: MagicMock()
+            ),
+            "Flux2KleinEdit": MagicMock(
+                name="Flux2KleinEdit", side_effect=lambda **kw: MagicMock()
+            ),
             "ZImage": MagicMock(name="ZImage", side_effect=lambda **kw: MagicMock()),
             "FIBO": MagicMock(name="FIBO", side_effect=lambda **kw: MagicMock()),
-            "FIBOEdit": MagicMock(name="FIBOEdit", side_effect=lambda **kw: MagicMock()),
-            "QwenImage": MagicMock(name="QwenImage", side_effect=lambda **kw: MagicMock()),
-            "QwenImageEdit": MagicMock(name="QwenImageEdit", side_effect=lambda **kw: MagicMock()),
+            "FIBOEdit": MagicMock(
+                name="FIBOEdit", side_effect=lambda **kw: MagicMock()
+            ),
+            "QwenImage": MagicMock(
+                name="QwenImage", side_effect=lambda **kw: MagicMock()
+            ),
+            "QwenImageEdit": MagicMock(
+                name="QwenImageEdit", side_effect=lambda **kw: MagicMock()
+            ),
             "SeedVR2": MagicMock(name="SeedVR2", side_effect=lambda **kw: MagicMock()),
             "ModelConfig": mock_model_config,
         }
@@ -310,3 +352,117 @@ class TestModelCacheLoraStyle:
 
         assert "lora_paths" not in captured_kwargs
         assert "lora_scales" not in captured_kwargs
+
+
+class TestModelCacheLRU:
+    """Tests for LRU eviction behavior in ModelCache."""
+
+    def _make_cache_with_mock(self, max_models=2):
+        """Create a ModelCache with mocked imports."""
+        cache = ModelCache(max_models=max_models)
+
+        mock_model_config = MagicMock()
+        for method_name in [
+            "schnell",
+            "dev",
+            "flux2_klein_4b",
+            "flux2_klein_9b",
+            "flux2_klein_base_4b",
+            "flux2_klein_base_9b",
+            "z_image",
+            "z_image_turbo",
+            "fibo",
+            "fibo_lite",
+            "fibo_edit",
+            "fibo_edit_rmbg",
+            "qwen_image",
+            "qwen_image_edit",
+            "seedvr2_3b",
+            "seedvr2_7b",
+        ]:
+            getattr(mock_model_config, method_name).return_value = MagicMock(
+                name=f"config_{method_name}"
+            )
+
+        mock_imports = {
+            "Flux1": MagicMock(name="Flux1", side_effect=lambda **kw: MagicMock()),
+            "Flux2Klein": MagicMock(
+                name="Flux2Klein", side_effect=lambda **kw: MagicMock()
+            ),
+            "Flux2KleinEdit": MagicMock(
+                name="Flux2KleinEdit", side_effect=lambda **kw: MagicMock()
+            ),
+            "ZImage": MagicMock(name="ZImage", side_effect=lambda **kw: MagicMock()),
+            "FIBO": MagicMock(name="FIBO", side_effect=lambda **kw: MagicMock()),
+            "FIBOEdit": MagicMock(
+                name="FIBOEdit", side_effect=lambda **kw: MagicMock()
+            ),
+            "QwenImage": MagicMock(
+                name="QwenImage", side_effect=lambda **kw: MagicMock()
+            ),
+            "QwenImageEdit": MagicMock(
+                name="QwenImageEdit", side_effect=lambda **kw: MagicMock()
+            ),
+            "SeedVR2": MagicMock(name="SeedVR2", side_effect=lambda **kw: MagicMock()),
+            "ModelConfig": mock_model_config,
+        }
+        cache._imports = mock_imports
+        return cache, mock_imports
+
+    def test_default_max_models(self):
+        cache = ModelCache()
+        assert cache.max_models == 1
+
+    def test_custom_max_models(self):
+        cache = ModelCache(max_models=3)
+        assert cache.max_models == 3
+
+    def test_size_property(self):
+        cache, mocks = self._make_cache_with_mock(max_models=3)
+        assert cache.size == 0
+        cache.get_model("schnell")
+        assert cache.size == 1
+        cache.get_model("dev")
+        assert cache.size == 2
+
+    def test_lru_eviction_fires(self):
+        cache, mocks = self._make_cache_with_mock(max_models=1)
+        model_a1 = cache.get_model("schnell")
+        model_b = cache.get_model("dev")
+        assert cache.size == 1
+        # A was evicted, loading it again should create a new instance
+        model_a2 = cache.get_model("schnell")
+        assert model_a1 is not model_a2
+        assert model_a2 is not model_b
+
+    def test_cache_hit_updates_recency(self):
+        cache, mocks = self._make_cache_with_mock(max_models=2)
+        model_a = cache.get_model("schnell")
+        model_b = cache.get_model("dev")
+        # Hit A again — this should make A most-recently used
+        model_a2 = cache.get_model("schnell")
+        assert model_a is model_a2
+        # Load C — B should be evicted because it's now LRU
+        model_c = cache.get_model("flux2-klein-4b")
+        assert cache.size == 2
+        # A should still be cached
+        model_a3 = cache.get_model("schnell")
+        assert model_a is model_a3
+        # B was evicted, loading it again creates a new instance
+        model_b2 = cache.get_model("dev")
+        assert model_b is not model_b2
+
+    def test_clear_resets_size(self):
+        cache, mocks = self._make_cache_with_mock(max_models=2)
+        cache.get_model("schnell")
+        cache.get_model("dev")
+        assert cache.size == 2
+        cache.clear()
+        assert cache.size == 0
+
+    def test_eviction_logs_to_stderr(self, capsys):
+        cache, mocks = self._make_cache_with_mock(max_models=1)
+        cache.get_model("schnell")
+        cache.get_model("dev")
+        captured = capsys.readouterr()
+        assert "[mflux-cache] evicting model" in captured.err

@@ -7,7 +7,9 @@ generation call.
 """
 
 import os
+import sys
 import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable
 
@@ -182,8 +184,11 @@ class ModelCache:
 
     _REGISTRY = _build_registry()
 
-    def __init__(self) -> None:
-        self._cache: dict[tuple[str, int | None, str | None], Any] = {}
+    def __init__(self, max_models: int = 1) -> None:
+        self.max_models = max_models
+        self._cache: OrderedDict[tuple[str, int | None, str | None], Any] = (
+            OrderedDict()
+        )
         self._lock = threading.Lock()
         self._imports: dict[str, Any] | None = None
         self._imports_lock = threading.Lock()
@@ -229,6 +234,7 @@ class ModelCache:
         # Fast path: check cache without loading anything
         with self._lock:
             if key in self._cache:
+                self._cache.move_to_end(key)
                 return self._cache[key]
 
         # Validate model name before doing expensive work
@@ -277,6 +283,9 @@ class ModelCache:
         with self._lock:
             # Double-check after loading (another thread may have loaded it)
             if key not in self._cache:
+                while len(self._cache) >= self.max_models:
+                    oldest_key, _ = self._cache.popitem(last=False)
+                    print(f"[mflux-cache] evicting model {oldest_key}", file=sys.stderr)
                 self._cache[key] = model
             return self._cache[key]
 
@@ -284,3 +293,8 @@ class ModelCache:
         """Clear all cached models, releasing memory."""
         with self._lock:
             self._cache.clear()
+
+    @property
+    def size(self) -> int:
+        """Return the number of cached model instances."""
+        return len(self._cache)
