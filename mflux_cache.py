@@ -214,6 +214,10 @@ class ModelCache:
     ) -> Any:
         """Get or lazily load a cached model instance.
 
+        The cache lock is held for the entire get-or-load operation so that
+        concurrent callers block rather than each loading a multi-GB model
+        into RAM simultaneously (which would crash the system).
+
         Args:
             model_name: Model name string (e.g. "schnell", "flux2-klein-4b").
             quantize: Quantization bit-width (4, 8, or None for full precision).
@@ -231,13 +235,7 @@ class ModelCache:
         """
         key = (model_name, quantize, lora_style)
 
-        # Fast path: check cache without loading anything
-        with self._lock:
-            if key in self._cache:
-                self._cache.move_to_end(key)
-                return self._cache[key]
-
-        # Validate model name before doing expensive work
+        # Validate model name before acquiring the lock (cheap, no side effects)
         if model_name not in self._REGISTRY:
             available = ", ".join(sorted(self._REGISTRY.keys()))
             raise ValueError(
@@ -253,41 +251,51 @@ class ModelCache:
                 f"lora_style cannot be used with SeedVR2 models."
             )
 
-        # Get lazily-imported classes
-        imports = self._get_imports()
-        model_cls = imports[class_key]
-        model_config_cls = imports["ModelConfig"]
-        config_factory = getattr(model_config_cls, config_factory_name)
-
-        # Resolve LoRA path if a style was requested (lazy import to keep startup fast)
-        lora_kwargs: dict[str, Any] = {}
-        if lora_style is not None:
-            from mflux.models.flux.variants.in_context.utils.in_context_loras import (
-                get_lora_path,
-            )
-
-            lora_path = get_lora_path(lora_style)
-            lora_kwargs = {"lora_paths": [lora_path], "lora_scales": [1.0]}
-
-        try:
-            model = model_cls(
-                quantize=quantize, model_config=config_factory(), **lora_kwargs
-            )
-        except GatedRepoError:
-            raise  # let it propagate to the tool layer for user-friendly messaging
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to load model '{model_name}' with quantize={quantize}: {e}"
-            ) from e
-
+        # Hold the lock for the entire get-or-load to prevent concurrent
+        # threads from each loading a multi-GB model simultaneously.
         with self._lock:
-            # Double-check after loading (another thread may have loaded it)
-            if key not in self._cache:
-                while len(self._cache) >= self.max_models:
-                    oldest_key, _ = self._cache.popitem(last=False)
-                    print(f"[mflux-cache] evicting model {oldest_key}", file=sys.stderr)
-                self._cache[key] = model
-            return self._cache[key]
+            # Fast path: cache hit
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                return self._cache[key]
+
+            # Cache miss — load model while holding the lock.
+            # This blocks other callers, which is intentional: we never want
+            # multiple model loads in flight at the same time on Apple Silicon.
+
+            # Get lazily-imported classes
+            imports = self._get_imports()
+            model_cls = imports[class_key]
+            model_config_cls = imports["ModelConfig"]
+            config_factory = getattr(model_config_cls, config_factory_name)
+
+            # Resolve LoRA path if a style was requested
+            lora_kwargs: dict[str, Any] = {}
+            if lora_style is not None:
+                from mflux.models.flux.variants.in_context.utils.in_context_loras import (
+                    get_lora_path,
+                )
+
+                lora_path = get_lora_path(lora_style)
+                lora_kwargs = {"lora_paths": [lora_path], "lora_scales": [1.0]}
+
+            try:
+                model = model_cls(
+                    quantize=quantize, model_config=config_factory(), **lora_kwargs
+                )
+            except GatedRepoError:
+                raise  # let it propagate to the tool layer for user-friendly messaging
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to load model '{model_name}' with quantize={quantize}: {e}"
+                ) from e
+
+            # Evict oldest if at capacity, then store
+            while len(self._cache) >= self.max_models:
+                oldest_key, _ = self._cache.popitem(last=False)
+                print(f"[mflux-cache] evicting model {oldest_key}", file=sys.stderr)
+            self._cache[key] = model
+            return model
 
     def clear(self) -> None:
         """Clear all cached models, releasing memory."""

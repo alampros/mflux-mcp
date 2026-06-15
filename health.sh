@@ -109,6 +109,33 @@ else
   fail "Not Apple Silicon — mflux requires Apple Silicon (arm64) for MLX"
 fi
 
+# ── 8. New v2 files ─────────────────────────────────────────────────
+echo ""
+echo "v2 Architecture:"
+if [[ -f "$SCRIPT_DIR/job_queue.py" ]]; then
+  pass "job_queue.py found"
+else
+  warn "job_queue.py not found"
+fi
+
+if [[ -f "$SCRIPT_DIR/worker.py" ]]; then
+  pass "worker.py found"
+else
+  warn "worker.py not found"
+fi
+
+if [[ -f "$SCRIPT_DIR/subprocess_runner.py" ]]; then
+  pass "subprocess_runner.py found"
+else
+  warn "subprocess_runner.py not found"
+fi
+
+if [[ -f "$SCRIPT_DIR/REWRITE-PLAN.md" ]]; then
+  pass "REWRITE-PLAN.md found"
+else
+  warn "REWRITE-PLAN.md not found"
+fi
+
 # ── Summary ──────────────────────────────────────────────────────────
 echo ""
 if [[ "$FAIL" -gt 0 ]]; then

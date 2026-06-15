@@ -11,6 +11,7 @@ dependencies = [
     "mflux",
     "fastmcp",
     "mcp",
+    "psutil",
 ]
 
 [project.scripts]
@@ -23,7 +24,7 @@ dev = [
 ]
 
 [tool.setuptools]
-py-modules = ["server", "mflux_cache"]
+py-modules = ["server", "mflux_cache", "job_queue", "subprocess_runner", "worker"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

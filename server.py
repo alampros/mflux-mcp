@@ -1,24 +1,42 @@
 """mflux-mcp — MCP server exposing mflux image generation to LLM agents."""
 
 import asyncio
-import concurrent.futures
-import functools
-import io
 import os
 import random
 import sys
-import threading
-import time
+from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastmcp import Context, FastMCP
+from fastmcp import FastMCP
 from fastmcp.utilities.types import Image
-from huggingface_hub.errors import GatedRepoError
 from mflux.utils.metadata_reader import MetadataReader
 
+from job_queue import JobQueue
 from mflux_cache import ModelCache, _REPO_MAP, is_model_cached
+from worker import WorkerManager
 
-INFERENCE_TIMEOUT = 300.0  # seconds — timeout for model inference tools
-HEARTBEAT_INTERVAL = 10.0  # seconds — interval for progress heartbeats during inference
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
+_VALID_LORA_STYLES = {
+    "couple",
+    "font",
+    "home",
+    "identity",
+    "illustration",
+    "portrait",
+    "ppt",
+    "sandstorm",
+    "sparklers",
+    "storyboard",
+}
+_VALID_QUANTIZE = {4, 8, None}
+
+_queue: JobQueue | None = None
+_cache: ModelCache | None = None
+_worker_manager: WorkerManager | None = None
 
 
 def _log(msg: str) -> None:
@@ -26,349 +44,273 @@ def _log(msg: str) -> None:
     print(f"[mflux-mcp] {msg}", file=sys.stderr, flush=True)
 
 
-mcp = FastMCP("mflux-mcp")
-cache = ModelCache()
-_inference_lock = asyncio.Semaphore(1)
-
-# ---------------------------------------------------------------------------
-# Dedicated single-thread executor for all MLX GPU work.
-#
-# MLX binds ``Stream(gpu, 0)`` to the thread that first creates it.  If model
-# loading happens on thread A and inference on thread B, thread B has no GPU
-# stream and ``mx.eval`` raises:
-#     RuntimeError: There is no Stream(gpu, 0) in current thread.
-#
-# Pinning *all* MLX work (model loading + inference) to a single persistent
-# thread guarantees the stream is always available.
-# ---------------------------------------------------------------------------
-_mlx_executor = concurrent.futures.ThreadPoolExecutor(
-    max_workers=1, thread_name_prefix="mlx-gpu"
-)
-
-
-async def _run_on_mlx_thread(fn, *args, **kwargs):
-    """Run *fn* on the dedicated MLX GPU thread and return the result.
-
-    All MLX operations (model loading, inference, evaluation) must happen
-    on the same thread so they share a single ``Stream(gpu, 0)``.
-    """
-    fn_name = getattr(fn, "__qualname__", getattr(fn, "__name__", repr(fn)))
-    _log(f"mlx-dispatch {fn_name}")
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        _mlx_executor, functools.partial(fn, *args, **kwargs)
-    )
-
-
-def _heartbeat_thread_fn(
-    stop_event: threading.Event,
-    loop: asyncio.AbstractEventLoop,
-    ctx,
-    stage_message: str,
-    progress_current: int,
-    progress_total: int,
-    fn_name: str,
-):
-    """Send periodic heartbeats from a daemon thread.
-
-    Uses ``time.sleep`` (which releases the GIL) so heartbeats fire reliably
-    even if the asyncio event loop is slow to process callbacks.  Progress
-    notifications are scheduled on the event loop via
-    ``asyncio.run_coroutine_threadsafe``.
-    """
-    start = time.monotonic()
-    count = 0
-    _log(f"heartbeat thread started for {fn_name} (interval={HEARTBEAT_INTERVAL:.1f}s)")
-    while not stop_event.wait(timeout=HEARTBEAT_INTERVAL):
-        count += 1
-        elapsed = time.monotonic() - start
-        message = f"{stage_message} (elapsed: {int(elapsed)}s)"
-        _log(
-            f"heartbeat #{count} for {fn_name} — progress {progress_current}/{progress_total} {message!r}"
-        )
-        try:
-            future = asyncio.run_coroutine_threadsafe(
-                ctx.report_progress(progress_current, progress_total, message),
-                loop,
-            )
-            # Wait briefly for the event loop to process it; don't block forever
-            future.result(timeout=5.0)
-            _log(f"heartbeat #{count} for {fn_name} — sent successfully")
-        except Exception as exc:
-            _log(f"heartbeat #{count} for {fn_name} — report_progress FAILED: {exc}")
-    elapsed = time.monotonic() - start
-    _log(
-        f"heartbeat thread stopped for {fn_name} — {elapsed:.1f}s elapsed, {count} heartbeats sent"
-    )
-
-
-async def _run_with_heartbeat(
-    blocking_fn,
-    kwargs: dict,
-    ctx,
-    stage_message: str,
-    progress_current: int = 2,
-    progress_total: int = 4,
-):
-    """Run a blocking callable on the MLX thread while sending periodic progress heartbeats.
-
-    Dispatches the blocking function to ``_mlx_executor`` and, if a FastMCP
-    context is available, sends progress notifications every HEARTBEAT_INTERVAL
-    seconds to keep the MCP client's timeout clock from expiring.
-
-    Uses a dedicated daemon thread with ``time.sleep`` for heartbeats so they
-    fire independently of the asyncio event loop's ability to process timer
-    callbacks.
-    """
-    fn_name = getattr(
-        blocking_fn, "__qualname__", getattr(blocking_fn, "__name__", repr(blocking_fn))
-    )
-
-    if ctx is None:
-        _log(f"_run_with_heartbeat ctx=None — no heartbeats for {fn_name}")
-        return await _run_on_mlx_thread(blocking_fn, **kwargs)
-
-    _log(
-        f"_run_with_heartbeat starting for {fn_name} (interval={HEARTBEAT_INTERVAL:.1f}s)"
-    )
-    loop = asyncio.get_running_loop()
-    stop_event = threading.Event()
-    hb_thread = threading.Thread(
-        target=_heartbeat_thread_fn,
-        args=(
-            stop_event,
-            loop,
-            ctx,
-            stage_message,
-            progress_current,
-            progress_total,
-            fn_name,
-        ),
-        daemon=True,
-        name=f"heartbeat-{fn_name}",
-    )
-    hb_thread.start()
+@asynccontextmanager
+async def _app_lifespan(server: FastMCP):
+    """FastMCP lifespan — start workers on startup, stop on shutdown."""
+    global _worker_manager
+    if _worker_manager is not None:
+        await _worker_manager.start()
     try:
-        result = await _run_on_mlx_thread(blocking_fn, **kwargs)
+        yield {}
     finally:
-        stop_event.set()
-        hb_thread.join(timeout=5.0)
-    return result
+        if _worker_manager is not None:
+            await _worker_manager.stop()
 
 
-@mcp.tool(timeout=INFERENCE_TIMEOUT)
+mcp = FastMCP("mflux-mcp", lifespan=_app_lifespan)
+
+
+# ---------------------------------------------------------------------------
+# Inference tools (queue-based)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
 async def generate_image(
     prompt: str,
+    output_path: str,
     model: str = "flux2-klein-4b",
     width: int = 1024,
     height: int = 1024,
     steps: int = 4,
     seed: int | None = None,
-    quantize: int = 8,
-    output_path: str | None = None,
+    quantize: int | None = 8,
     lora_style: str | None = None,
-    ctx: Context | None = None,
-) -> Image | str:
-    """Generate an image from a text prompt using mflux.
+    backend: str = "thread",
+    timeout: float = 300.0,
+) -> dict:
+    """Submit a text-to-image generation job to the async queue.
+
+    Returns a job descriptor immediately — the job runs in the background.
+    Use get_job() to poll for completion. Image generation typically takes
+    30–90 seconds depending on model and parameters, so poll no more
+    frequently than every 10 seconds to avoid unnecessary overhead.
 
     Args:
         prompt: Text description of the image to generate.
+        output_path: File path to write the output image to.
         model: Model name (e.g. "flux2-klein-4b", "schnell", "z-image").
         width: Image width in pixels.
         height: Image height in pixels.
         steps: Number of inference steps.
         seed: Random seed for reproducibility. Auto-generated if not provided.
         quantize: Quantization bit-width (4, 8, or None for full precision).
-        output_path: Optional file path to save the image to. When provided,
-            parent directories are created automatically and the absolute path
-            is returned as a string. When omitted, raw image bytes are returned
-            via the FastMCP Image type.
-        lora_style: Optional LoRA style to apply. Valid values: couple, font,
-            home, identity, illustration, portrait, ppt, sandstorm, sparklers,
-            storyboard.
+        lora_style: Optional LoRA style to apply.
+        backend: Execution backend — "thread" or "subprocess".
+        timeout: Per-job timeout in seconds.
 
     Returns:
-        FastMCP Image when output_path is None, otherwise the absolute file
-        path as a string.
+        A job descriptor dict with job_id, status, command, output_path, backend.
     """
+    if _queue is None:
+        raise RuntimeError("Server not initialized — queue is not available.")
+
+    if model not in ModelCache._REGISTRY:
+        available = ", ".join(sorted(ModelCache._REGISTRY.keys()))
+        raise ValueError(f"Unknown model: '{model}'. Available models: {available}")
+
+    if quantize not in _VALID_QUANTIZE:
+        raise ValueError(f"Invalid quantize={quantize}. Must be one of: 4, 8, or None.")
+
+    if lora_style is not None and lora_style not in _VALID_LORA_STYLES:
+        valid = ", ".join(sorted(_VALID_LORA_STYLES))
+        raise ValueError(f"Invalid lora_style='{lora_style}'. Valid: {valid}")
+
+    if backend not in ("thread", "subprocess"):
+        raise ValueError(
+            f"Invalid backend='{backend}'. Must be 'thread' or 'subprocess'."
+        )
+
     if seed is None:
         seed = random.randint(0, 2**32 - 1)
 
     _log(
-        f"generate_image [v3-heartbeat-thread] model={model} size={width}x{height} steps={steps} "
-        f"seed={seed} quantize={quantize} lora={lora_style} ctx={ctx is not None} prompt={prompt!r}"
+        f"generate_image [queue-submit] model={model} size={width}x{height} steps={steps} "
+        f"seed={seed} quantize={quantize} lora={lora_style} backend={backend} prompt={prompt!r}"
     )
 
-    if ctx is not None:
-        await ctx.report_progress(0, 4, "queued")
-
-    async with _inference_lock:
-        if ctx is not None:
-            await ctx.report_progress(1, 4, "loading model")
-        try:
-            loaded_model = await _run_on_mlx_thread(
-                cache.get_model, model, quantize=quantize, lora_style=lora_style
-            )
-        except GatedRepoError:
-            _, config_factory_name, _ = ModelCache._REGISTRY[model]
-            repo_id = _REPO_MAP.get(config_factory_name, model)
-            raise RuntimeError(
-                f"Model '{model}' requires access to a gated HuggingFace repository.\n\n"
-                f"To resolve this:\n"
-                f"1. Visit https://huggingface.co/{repo_id} and request access\n"
-                f"2. Authenticate locally by running: huggingface-cli login\n"
-                f"   Or set the HF_TOKEN environment variable with your access token\n"
-                f"3. Retry the operation"
-            )
-
-        if ctx is not None:
-            await ctx.report_progress(2, 4, "generating")
-        result = await _run_with_heartbeat(
-            loaded_model.generate_image,
-            kwargs=dict(
-                seed=seed,
-                prompt=prompt,
-                num_inference_steps=steps,
-                width=width,
-                height=height,
-            ),
-            ctx=ctx,
-            stage_message="generating",
-        )
-
-        if ctx is not None:
-            await ctx.report_progress(3, 4, "saving")
-        buf = io.BytesIO()
-        result.image.save(buf, format="PNG")
-        image_bytes = buf.getvalue()
-
-        if output_path is not None:
-            output_path = os.path.abspath(output_path)
-            parent = os.path.dirname(output_path)
-            if parent:
-                os.makedirs(parent, exist_ok=True)
-            with open(output_path, "wb") as f:
-                f.write(image_bytes)
-            return output_path
-
-        return Image(data=image_bytes, format="png")
+    job = _queue.submit(
+        command="generate_image",
+        params={
+            "prompt": prompt,
+            "model": model,
+            "width": width,
+            "height": height,
+            "steps": steps,
+            "seed": seed,
+            "quantize": quantize,
+            "lora_style": lora_style,
+        },
+        output_path=output_path,
+        backend=backend,
+        timeout_s=timeout,
+    )
+    return {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "command": job["command"],
+        "output_path": job["output_path"],
+        "backend": job["backend"],
+    }
 
 
-@mcp.tool(timeout=INFERENCE_TIMEOUT)
+@mcp.tool()
 async def edit_image(
     image_paths: list[str],
     prompt: str,
+    output_path: str,
     model: str = "flux2-klein-edit",
     steps: int = 4,
     seed: int | None = None,
-    quantize: int = 8,
-    output_path: str | None = None,
+    quantize: int | None = 8,
     lora_style: str | None = None,
-    ctx: Context | None = None,
-) -> Image | str:
-    """Edit an image using an mflux edit model.
+    backend: str = "thread",
+    timeout: float = 300.0,
+) -> dict:
+    """Submit an image editing job to the async queue.
 
-    Accepts one or more input images and a text prompt describing the edit.
+    Returns a job descriptor immediately — the job runs in the background.
+    Use get_job() to poll for completion. Image editing typically takes
+    30–90 seconds depending on model and parameters, so poll no more
+    frequently than every 10 seconds to avoid unnecessary overhead.
 
     Args:
-        image_paths: List of input image file paths. FIBOEdit models use
-            only the first path; Flux2KleinEdit and QwenImageEdit can use
-            multiple reference images.
+        image_paths: List of input image file paths.
         prompt: Text description of the desired edit.
-        model: Edit model name (e.g. "flux2-klein-edit", "fibo-edit",
-            "qwen-image-edit").
+        output_path: File path to write the output image to.
+        model: Edit model name (e.g. "flux2-klein-edit", "fibo-edit").
         steps: Number of inference steps.
         seed: Random seed for reproducibility. Auto-generated if not provided.
         quantize: Quantization bit-width (4, 8, or None for full precision).
-        output_path: Optional file path to save the image to. When provided,
-            parent directories are created automatically and the absolute path
-            is returned as a string. When omitted, raw image bytes are returned
-            via the FastMCP Image type.
-        lora_style: Optional LoRA style to apply. Valid values: couple, font,
-            home, identity, illustration, portrait, ppt, sandstorm, sparklers,
-            storyboard.
+        lora_style: Optional LoRA style to apply.
+        backend: Execution backend — "thread" or "subprocess".
+        timeout: Per-job timeout in seconds.
 
     Returns:
-        FastMCP Image when output_path is None, otherwise the absolute file
-        path as a string.
+        A job descriptor dict with job_id, status, command, output_path, backend.
 
     Raises:
         ValueError: If image_paths is empty.
     """
+    if _queue is None:
+        raise RuntimeError("Server not initialized — queue is not available.")
+
     if not image_paths:
         raise ValueError("image_paths must contain at least one image path.")
+
+    if model not in ModelCache._REGISTRY:
+        available = ", ".join(sorted(ModelCache._REGISTRY.keys()))
+        raise ValueError(f"Unknown model: '{model}'. Available models: {available}")
+
+    # Verify the model supports editing
+    class_key = ModelCache._REGISTRY[model][0]
+    if class_key not in ("Flux2KleinEdit", "FIBOEdit", "QwenImageEdit"):
+        raise ValueError(f"Model '{model}' does not support image editing.")
+
+    if quantize not in _VALID_QUANTIZE:
+        raise ValueError(f"Invalid quantize={quantize}. Must be one of: 4, 8, or None.")
+
+    if lora_style is not None and lora_style not in _VALID_LORA_STYLES:
+        valid = ", ".join(sorted(_VALID_LORA_STYLES))
+        raise ValueError(f"Invalid lora_style='{lora_style}'. Valid: {valid}")
+
+    if backend not in ("thread", "subprocess"):
+        raise ValueError(
+            f"Invalid backend='{backend}'. Must be 'thread' or 'subprocess'."
+        )
 
     if seed is None:
         seed = random.randint(0, 2**32 - 1)
 
     _log(
-        f"edit_image [v3-heartbeat-thread] model={model} steps={steps} seed={seed} "
-        f"quantize={quantize} lora={lora_style} ctx={ctx is not None} images={image_paths} prompt={prompt!r}"
+        f"edit_image [queue-submit] model={model} steps={steps} seed={seed} "
+        f"quantize={quantize} lora={lora_style} backend={backend} images={image_paths} prompt={prompt!r}"
     )
 
-    if ctx is not None:
-        await ctx.report_progress(0, 4, "queued")
+    job = _queue.submit(
+        command="edit_image",
+        params={
+            "image_paths": image_paths,
+            "prompt": prompt,
+            "model": model,
+            "steps": steps,
+            "seed": seed,
+            "quantize": quantize,
+            "lora_style": lora_style,
+        },
+        output_path=output_path,
+        backend=backend,
+        timeout_s=timeout,
+    )
+    return {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "command": job["command"],
+        "output_path": job["output_path"],
+        "backend": job["backend"],
+    }
 
-    async with _inference_lock:
-        if ctx is not None:
-            await ctx.report_progress(1, 4, "loading model")
-        try:
-            loaded_model = await _run_on_mlx_thread(
-                cache.get_model, model, quantize=quantize, lora_style=lora_style
-            )
-        except GatedRepoError:
-            _, config_factory_name, _ = ModelCache._REGISTRY[model]
-            repo_id = _REPO_MAP.get(config_factory_name, model)
-            raise RuntimeError(
-                f"Model '{model}' requires access to a gated HuggingFace repository.\n\n"
-                f"To resolve this:\n"
-                f"1. Visit https://huggingface.co/{repo_id} and request access\n"
-                f"2. Authenticate locally by running: huggingface-cli login\n"
-                f"   Or set the HF_TOKEN environment variable with your access token\n"
-                f"3. Retry the operation"
-            )
 
-        if ctx is not None:
-            await ctx.report_progress(2, 4, "generating")
-        class_key = ModelCache._REGISTRY[model][0]
-        if class_key == "FIBOEdit":
-            inference_kwargs = dict(
-                seed=seed,
-                prompt=prompt,
-                image_path=image_paths[0],
-                num_inference_steps=steps,
-            )
-        else:
-            inference_kwargs = dict(
-                seed=seed,
-                prompt=prompt,
-                image_paths=image_paths,
-                num_inference_steps=steps,
-            )
-        result = await _run_with_heartbeat(
-            loaded_model.generate_image,
-            kwargs=inference_kwargs,
-            ctx=ctx,
-            stage_message="generating",
-        )
+# ---------------------------------------------------------------------------
+# Queue management tools
+# ---------------------------------------------------------------------------
 
-        if ctx is not None:
-            await ctx.report_progress(3, 4, "saving")
-        buf = io.BytesIO()
-        result.image.save(buf, format="PNG")
-        image_bytes = buf.getvalue()
 
-        if output_path is not None:
-            output_path = os.path.abspath(output_path)
-            parent = os.path.dirname(output_path)
-            if parent:
-                os.makedirs(parent, exist_ok=True)
-            with open(output_path, "wb") as f:
-                f.write(image_bytes)
-            return output_path
+@mcp.tool()
+def list_jobs(status: str | None = None, limit: int = 50) -> list[dict]:
+    """List jobs in the queue with optional status filter.
 
-        return Image(data=image_bytes, format="png")
+    Args:
+        status: Filter by job status (e.g. "queued", "running", "completed").
+            None returns jobs of all statuses.
+        limit: Maximum number of jobs to return.
 
+    Returns:
+        A list of job descriptor dicts, most-recently created first.
+    """
+    if _queue is None:
+        raise RuntimeError("Server not initialized — queue is not available.")
+    return _queue.list_jobs(status=status, limit=limit)
+
+
+@mcp.tool()
+def get_job(job_id: str) -> dict | None:
+    """Get full details of a single job.
+
+    Use this to check on a previously submitted generate_image or edit_image
+    job. Jobs typically take 30–90 seconds to complete. Do not poll more
+    frequently than every 10 seconds.
+
+    Args:
+        job_id: The UUID job identifier.
+
+    Returns:
+        The job descriptor dict, or None if not found.
+    """
+    if _queue is None:
+        raise RuntimeError("Server not initialized — queue is not available.")
+    return _queue.get_job(job_id)
+
+
+@mcp.tool()
+async def cancel_job(job_id: str) -> dict:
+    """Cancel a queued or running job.
+
+    Args:
+        job_id: The UUID job identifier.
+
+    Returns:
+        A dict with job_id and cancelled (True if action was taken).
+    """
+    if _worker_manager is None:
+        raise RuntimeError("Server not initialized — worker manager is not available.")
+    result = await _worker_manager.cancel_job(job_id)
+    return {"job_id": job_id, "cancelled": result}
+
+
+# ---------------------------------------------------------------------------
+# Utility tools (unchanged from v1)
+# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Metadata mappings for list_models (static — no mflux imports triggered)
@@ -483,13 +425,125 @@ def clear_cache() -> dict:
             - models_cleared: Number of models that were cached before clearing.
             - message: Human-readable summary.
     """
-    count = cache.size
-    cache.clear()
+    if _cache is None:
+        raise RuntimeError("Server not initialized — cache is not available.")
+    count = _cache.size
+    _cache.clear()
     return {
         "status": "ok",
         "models_cleared": count,
         "message": f"Cleared {count} cached model(s).",
     }
+
+
+# ---------------------------------------------------------------------------
+# System status tool
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def get_system_status() -> dict:
+    """Query system RAM, MLX Metal memory, GPU info, queue snapshot, and cached models.
+
+    All fields are best-effort — gracefully returns null for anything unavailable.
+    """
+    status: dict[str, Any] = {}
+
+    # RAM
+    try:
+        if psutil is not None:
+            mem = psutil.virtual_memory()
+            status["ram"] = {
+                "total_gb": round(mem.total / (1024**3), 1),
+                "available_gb": round(mem.available / (1024**3), 1),
+                "percent_used": mem.percent,
+            }
+        else:
+            status["ram"] = None
+    except Exception:
+        status["ram"] = None
+
+    # Metal (MLX GPU memory)
+    try:
+        import mlx.core as mx
+
+        # Prefer non-deprecated APIs; fall back to deprecated mx.metal.* for compatibility
+        _get_active = getattr(mx, "get_active_memory", None) or getattr(
+            mx.metal, "get_active_memory", None
+        )
+        _get_peak = getattr(mx, "get_peak_memory", None) or getattr(
+            mx.metal, "get_peak_memory", None
+        )
+        _get_cache = getattr(mx, "get_cache_memory", None) or getattr(
+            mx.metal, "get_cache_memory", None
+        )
+
+        status["metal"] = {
+            "active_mb": round(_get_active() / (1024**2)) if _get_active else None,
+            "peak_mb": round(_get_peak() / (1024**2)) if _get_peak else None,
+            "cache_mb": round(_get_cache() / (1024**2)) if _get_cache else None,
+        }
+    except Exception:
+        status["metal"] = None
+
+    # Chip
+    try:
+        import mlx.core as mx
+
+        _device_info = getattr(mx, "device_info", None) or getattr(
+            mx.metal, "device_info", None
+        )
+        info = _device_info() if _device_info else {}
+        status["chip"] = {
+            "name": info.get("device_name", None),
+            "gpu_cores": info.get("gpu_core_count", None),
+            "recommended_max_gb": (
+                round(
+                    info.get(
+                        "recommended_max_working_set_size",
+                        info.get("max_recommended_working_set_size", 0),
+                    )
+                    / (1024**3),
+                    1,
+                )
+                or None
+            ),
+        }
+    except Exception:
+        status["chip"] = None
+
+    # Queue counts
+    try:
+        if _queue is not None:
+            all_jobs = _queue.list_jobs()
+            queued = sum(1 for j in all_jobs if j["status"] == "queued")
+            running = sum(1 for j in all_jobs if j["status"] == "running")
+            status["queue"] = {"queued": queued, "running": running}
+        else:
+            status["queue"] = None
+    except Exception:
+        status["queue"] = None
+
+    # Cached models
+    try:
+        if _cache is not None:
+            cached_models = []
+            for key in _cache._cache.keys():
+                name, quantize, _lora = key
+                q_label = f"q{quantize}" if quantize else "fp"
+                cached_models.append(f"{name} ({q_label})")
+            status["cached_models"] = cached_models
+        else:
+            status["cached_models"] = []
+    except Exception:
+        status["cached_models"] = []
+
+    return status
+
+
+# ---------------------------------------------------------------------------
+# CLI and entry point
+# ---------------------------------------------------------------------------
 
 
 def parse_args(argv: list[str] | None = None):
@@ -521,7 +575,15 @@ def parse_args(argv: list[str] | None = None):
 
 def main():
     """Entry point for the mflux-mcp console script."""
+    global _queue, _cache, _worker_manager
+
     args = parse_args()
+
+    # Initialize components
+    db_path = Path(__file__).parent / "jobs.db"
+    _cache = ModelCache()
+    _queue = JobQueue(db_path)
+    _worker_manager = WorkerManager(_queue, _cache)
 
     kwargs: dict = {"transport": args.transport}
     if args.transport == "http":

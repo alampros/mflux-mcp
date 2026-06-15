@@ -130,84 +130,87 @@ Add to your Claude Desktop MCP config (`claude_desktop_config.json`):
 }
 ```
 
-### Example tool calls
-
-Generate an image:
-```json
-{
-  "tool": "generate_image",
-  "arguments": {
-    "prompt": "a cat astronaut floating in space, digital art",
-    "model": "schnell",
-    "width": 512,
-    "height": 512,
-    "steps": 4
-  }
-}
-```
-
-Edit an existing image:
-```json
-{
-  "tool": "edit_image",
-  "arguments": {
-    "image_paths": ["/path/to/input.png"],
-    "prompt": "add a rainbow in the background",
-    "model": "flux2-klein-edit"
-  }
-}
-```
-
-Save to a specific path (returns the absolute file path instead of image bytes):
-```json
-{
-  "tool": "generate_image",
-  "arguments": {
-    "prompt": "mountain landscape at sunset",
-    "output_path": "output/landscape.png"
-  }
-}
-```
-
 ## Available Tools
 
 | Tool | Description |
 |------|-------------|
-| `generate_image` | Generate an image from a text prompt |
-| `edit_image` | Edit an image using a text prompt and one or more reference images |
+| `generate_image` | Submit a text-to-image generation job to the async queue |
+| `edit_image` | Submit an image editing job to the async queue |
+| `list_jobs` | List jobs in the queue with optional status filter and limit |
+| `get_job` | Get full details of a single job by job_id |
+| `cancel_job` | Cancel a queued or running job |
 | `list_models` | List all available model families and variants with download status |
 | `get_image_metadata` | Read EXIF/XMP metadata embedded by mflux in generated images |
+| `clear_cache` | Clear all cached models and reclaim memory |
+| `get_system_status` | Query RAM, MLX Metal memory, GPU info, queue snapshot, and cached models |
 
 ### `generate_image`
 
-Generate an image from a text prompt using mflux.
+Submit a text-to-image generation job to the async queue. Returns a job descriptor immediately — the job runs in the background. Use `get_job()` to poll for completion.
 
 | Parameter | Type | Default | Required | Description |
 |-----------|------|---------|----------|-------------|
 | `prompt` | `str` | — | Yes | Text description of the image to generate |
+| `output_path` | `str` | — | Yes | File path to write the output image to. Parent directories are created automatically. |
 | `model` | `str` | `"flux2-klein-4b"` | | Model name (see [Supported Models](#supported-models)) |
 | `width` | `int` | `1024` | | Image width in pixels |
 | `height` | `int` | `1024` | | Image height in pixels |
 | `steps` | `int` | `4` | | Number of inference steps |
 | `seed` | `int \| None` | `None` | | Random seed for reproducibility (auto-generated if omitted) |
-| `quantize` | `int` | `8` | | Quantization bit-width (4, 8, or None for full precision) |
-| `output_path` | `str \| None` | `None` | | File path to save the image. Returns raw image bytes when omitted, absolute path string when provided. Parent directories are created automatically. |
+| `quantize` | `int \| None` | `8` | | Quantization bit-width (4, 8, or None for full precision) |
+| `lora_style` | `str \| None` | `None` | | Optional LoRA style to apply |
+| `backend` | `str` | `"thread"` | | Execution backend — `"thread"` or `"subprocess"` |
+| `timeout` | `float` | `300.0` | | Per-job timeout in seconds |
 
 ### `edit_image`
 
-Edit an image using a text prompt and one or more input images.
+Submit an image editing job to the async queue. Returns a job descriptor immediately — the job runs in the background. Use `get_job()` to poll for completion.
 
 | Parameter | Type | Default | Required | Description |
 |-----------|------|---------|----------|-------------|
 | `image_paths` | `list[str]` | — | Yes | Input image file paths |
 | `prompt` | `str` | — | Yes | Text description of the desired edit |
+| `output_path` | `str` | — | Yes | File path to write the output image to |
 | `model` | `str` | `"flux2-klein-edit"` | | Edit model name |
 | `steps` | `int` | `4` | | Number of inference steps |
 | `seed` | `int \| None` | `None` | | Random seed for reproducibility |
-| `quantize` | `int` | `8` | | Quantization bit-width |
-| `output_path` | `str \| None` | `None` | | File path to save the image |
+| `quantize` | `int \| None` | `8` | | Quantization bit-width |
+| `lora_style` | `str \| None` | `None` | | Optional LoRA style to apply |
+| `backend` | `str` | `"thread"` | | Execution backend — `"thread"` or `"subprocess"` |
+| `timeout` | `float` | `300.0` | | Per-job timeout in seconds |
 
 > **Note:** FIBOEdit models use only the first image path. Flux2KleinEdit and QwenImageEdit can accept multiple reference images.
+
+### `list_jobs`
+
+List jobs in the queue with optional status filter and limit.
+
+| Parameter | Type | Default | Required | Description |
+|-----------|------|---------|----------|-------------|
+| `status` | `str \| None` | `None` | | Filter by job status (`"queued"`, `"running"`, `"completed"`, `"failed"`, `"cancelled"`). None returns all statuses. |
+| `limit` | `int` | `50` | | Maximum number of jobs to return |
+
+Returns a list of job descriptor dicts, most-recently created first.
+
+### `get_job`
+
+Get full details of a single job by job_id, including progress and timing.
+
+| Parameter | Type | Default | Required | Description |
+|-----------|------|---------|----------|-------------|
+| `job_id` | `str` | — | Yes | The UUID job identifier |
+
+Returns the job descriptor dict, or `None` if not found.
+
+### `cancel_job`
+
+Cancel a queued or running job.
+
+| Parameter | Type | Default | Required | Description |
+|-----------|------|---------|----------|-------------|
+| `job_id` | `str` | — | Yes | The UUID job identifier |
+
+Returns a dict with `job_id` and `cancelled` (True if action was taken).
 
 ### `list_models`
 
@@ -222,6 +225,76 @@ Reads EXIF and XMP metadata embedded by mflux in generated images, including pro
 | Parameter | Type | Default | Required | Description |
 |-----------|------|---------|----------|-------------|
 | `image_path` | `str` | — | Yes | Path to the image file to inspect |
+
+### `clear_cache`
+
+Clear all cached models from the in-process LRU model cache, reclaiming unified memory on Apple Silicon. Use this when switching tasks or when memory pressure is high.
+
+No parameters required. Returns a dict with `status`, `models_cleared`, and `message`.
+
+### `get_system_status`
+
+Query system RAM, MLX Metal memory, GPU info, queue snapshot, and cached models. All fields are best-effort — gracefully returns null for anything unavailable.
+
+No parameters required.
+
+## Architecture
+
+### Queue-based async architecture
+
+All inference work (generation and editing) is submitted to a persistent SQLite work queue and executed asynchronously. This avoids MCP client timeouts for long-running operations that can take 30–120+ seconds.
+
+:::mermaid
+graph TB
+    Agent["LLM Agent"] -->|MCP tools| Server["server.py (FastMCP)"]
+    Server -->|"submit job"| Queue["SQLite Queue (jobs.db)"]
+    Server -->|"poll / cancel"| Queue
+    Queue -->|"backend=thread"| ThreadWorker["In-Process Worker<br/>(MLX thread pool)"]
+    Queue -->|"backend=subprocess"| SubprocessWorker["Subprocess Worker<br/>(isolated process)"]
+    ThreadWorker -->|"write status"| Queue
+    SubprocessWorker -->|"write status"| Queue
+    ThreadWorker --> GPU["Apple Silicon GPU<br/>(MLX)"]
+    SubprocessWorker --> GPU
+    ThreadWorker -->|"write image"| Disk["Output File<br/>(caller-provided path)"]
+    SubprocessWorker -->|"write image"| Disk
+:::
+
+### Thread vs subprocess backends
+
+| Backend | Speed | Isolation | Use case |
+|---------|-------|-----------|----------|
+| `thread` (default) | Fast — uses cached models | In-process — shares memory | Repeated generations with the same model |
+| `subprocess` | Slower — reloads model per job | Full process isolation | Stability, memory cleanup, crash containment |
+
+### Job lifecycle
+
+:::mermaid
+stateDiagram-v2
+    [*] --> queued : submit
+    queued --> running : worker picks up
+    queued --> cancelled : cancel_job
+    running --> completed : success
+    running --> failed : error
+    running --> timed_out : timeout exceeded
+    running --> cancelled : cancel_job
+    completed --> [*] : purged after TTL
+    failed --> [*] : purged after TTL
+    timed_out --> [*] : purged after TTL
+    cancelled --> [*] : purged after TTL
+:::
+
+### GPU exclusivity
+
+Only one job runs at a time across both backends due to an `asyncio.Lock`. The thread backend is fast but blocks; the subprocess backend is isolated but slower. This ensures the Apple Silicon GPU is not contended.
+
+### Usage example
+
+1. **Submit:** `generate_image(prompt="a cat astronaut floating in space, digital art", output_path="/tmp/out.png")`
+   → Returns: `{"job_id": "abc123", "status": "queued", ...}`
+2. **Poll:** `get_job(job_id="abc123")`
+   → Returns: `{"status": "running", "progress": {"phase": "generating"}, ...}`
+3. **Complete:** `get_job(job_id="abc123")`
+   → Returns: `{"status": "completed", "output_path": "/tmp/out.png", ...}`
 
 ## Supported Models
 
@@ -281,24 +354,31 @@ All tests use mocks — no GPU or downloaded models required.
 bash health.sh
 ```
 
-Checks toolchain (uv, python3), mflux CLI, project files, test suite, docs, harness data, and Apple Silicon hardware. Must exit 0 before closing any task.
+Checks toolchain (uv, python3), mflux CLI, project files, test suite, docs, harness data, Apple Silicon hardware, and v2 architecture files. Must exit 0 before closing any task.
 
 ### Project structure
 
 ```
 mflux-mcp/
-├── server.py              # MCP server entry point (FastMCP, 4 tools)
-├── mflux_cache.py         # Thread-safe lazy model cache & registry
-├── pyproject.toml         # Python project config (uv)
-├── health.sh              # Project health check script
-├── PLAN.md                # Architecture & design document
-├── AGENTS.md              # Agent navigation guide
-├── README.md              # This file
-├── LICENSE                # MIT License
+├── server.py              # MCP server entry point (FastMCP, 9 tools)
+├── job_queue.py            # SQLite job queue (WAL mode)
+├── worker.py               # WorkerManager (thread + subprocess backends)
+├── subprocess_runner.py    # Standalone subprocess runner
+├── mflux_cache.py          # Thread-safe lazy model cache & registry
+├── pyproject.toml          # Python project config (uv)
+├── health.sh               # Project health check script
+├── PLAN.md                 # v1 architecture (historical)
+├── REWRITE-PLAN.md         # v2 async queue architecture
+├── AGENTS.md               # Agent navigation guide
+├── README.md               # This file
+├── LICENSE                 # MIT License
 ├── tests/
-│   ├── conftest.py        # Test config (sys.path setup)
-│   ├── test_server.py     # MCP tool tests (15 test classes)
-│   └── test_model_cache.py # Model cache tests (4 test classes)
+│   ├── conftest.py        # Test config & shared fixtures
+│   ├── test_server.py     # MCP tool tests (16 test classes)
+│   ├── test_model_cache.py # Model cache tests (6 test classes)
+│   ├── test_job_queue.py  # Job queue tests (7 test classes)
+│   ├── test_worker.py     # Worker tests (5 test classes)
+│   └── test_subprocess_runner.py # Subprocess runner tests (4 test classes)
 └── output/                # Generated images directory (gitignored)
 ```
 
