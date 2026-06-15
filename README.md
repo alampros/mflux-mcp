@@ -41,12 +41,7 @@ cd mflux-mcp
 
 # Install Python dependencies
 uv sync
-
-# Install mflux as a uv tool (provides CLI commands used by health.sh)
-uv tool install mflux
 ```
-
-> **Note:** mflux is both a Python dependency (imported by the server) and a standalone CLI tool. `uv sync` handles the library dependency; `uv tool install mflux` provides CLI commands like `mflux-generate-flux2`.
 
 ## Usage
 
@@ -136,8 +131,9 @@ Add to your Claude Desktop MCP config (`claude_desktop_config.json`):
 |------|-------------|
 | `generate_image` | Submit a text-to-image generation job to the async queue |
 | `edit_image` | Submit an image editing job to the async queue |
+| `upscale_image` | Submit an image upscaling job to the async queue |
 | `list_jobs` | List jobs in the queue with optional status filter and limit |
-| `get_job` | Get full details of a single job by job_id |
+| `get_job` | Get full details of one or more jobs by job_id |
 | `cancel_job` | Cancel a queued or running job |
 | `list_models` | List all available model families and variants with download status |
 | `get_image_metadata` | Read EXIF/XMP metadata embedded by mflux in generated images |
@@ -181,6 +177,22 @@ Submit an image editing job to the async queue. Returns a job descriptor immedia
 
 > **Note:** FIBOEdit models use only the first image path. Flux2KleinEdit and QwenImageEdit can accept multiple reference images.
 
+### `upscale_image`
+
+Submit an image upscaling job to the async queue. Returns a job descriptor immediately — the job runs in the background. Use `get_job()` to poll for completion.
+
+| Parameter | Type | Default | Required | Description |
+|-----------|------|---------|----------|-------------|
+| `image_path` | `str` | — | Yes | Path to the input image to upscale |
+| `output_path` | `str` | — | Yes | File path to write the upscaled image to |
+| `model` | `str` | `"seedvr2-3b"` | | Upscale model name (e.g. `"seedvr2-3b"`, `"seedvr2-7b"`) |
+| `resolution` | `int` | `2160` | | Target shortest side in pixels (e.g. 2160 for ~4K) |
+| `softness` | `float` | `0.5` | | Pre-downsampling factor (0.0–1.0). Lower = sharper |
+| `seed` | `int \| None` | `None` | | Random seed for reproducibility |
+| `quantize` | `int \| None` | `8` | | Quantization bit-width (4, 8, or None for full precision) |
+| `backend` | `str` | `"thread"` | | Execution backend — `"thread"` or `"subprocess"` |
+| `timeout` | `float` | `300.0` | | Per-job timeout in seconds |
+
 ### `list_jobs`
 
 List jobs in the queue with optional status filter and limit.
@@ -194,13 +206,13 @@ Returns a list of job descriptor dicts, most-recently created first.
 
 ### `get_job`
 
-Get full details of a single job by job_id, including progress and timing.
+Get full details of one or more jobs, including progress and timing.
 
 | Parameter | Type | Default | Required | Description |
 |-----------|------|---------|----------|-------------|
-| `job_id` | `str` | — | Yes | The UUID job identifier |
+| `job_id` | `str \| list[str]` | — | Yes | A single UUID string, or a list of UUIDs to fetch multiple jobs at once |
 
-Returns the job descriptor dict, or `None` if not found.
+When `job_id` is a string, returns the job descriptor dict or `None` if not found. When `job_id` is a list, returns a list of job descriptor dicts (or `None` per missing job) in the same order as the input IDs.
 
 ### `cancel_job`
 
@@ -348,38 +360,26 @@ uv run pytest tests/
 
 All tests use mocks — no GPU or downloaded models required.
 
-### Health check
-
-```bash
-bash health.sh
-```
-
-Checks toolchain (uv, python3), mflux CLI, project files, test suite, docs, harness data, Apple Silicon hardware, and v2 architecture files. Must exit 0 before closing any task.
-
 ### Project structure
 
 ```
 mflux-mcp/
-├── server.py              # MCP server entry point (FastMCP, 9 tools)
+├── server.py              # MCP server entry point (FastMCP, 10 tools)
 ├── job_queue.py            # SQLite job queue (WAL mode)
 ├── worker.py               # WorkerManager (thread + subprocess backends)
 ├── subprocess_runner.py    # Standalone subprocess runner
 ├── mflux_cache.py          # Thread-safe lazy model cache & registry
 ├── pyproject.toml          # Python project config (uv)
-├── health.sh               # Project health check script
-├── PLAN.md                 # v1 architecture (historical)
-├── REWRITE-PLAN.md         # v2 async queue architecture
 ├── AGENTS.md               # Agent navigation guide
 ├── README.md               # This file
 ├── LICENSE                 # MIT License
-├── tests/
-│   ├── conftest.py        # Test config & shared fixtures
-│   ├── test_server.py     # MCP tool tests (16 test classes)
-│   ├── test_model_cache.py # Model cache tests (6 test classes)
-│   ├── test_job_queue.py  # Job queue tests (7 test classes)
-│   ├── test_worker.py     # Worker tests (5 test classes)
-│   └── test_subprocess_runner.py # Subprocess runner tests (4 test classes)
-└── output/                # Generated images directory (gitignored)
+└── tests/
+    ├── conftest.py        # Test config & shared fixtures
+    ├── test_server.py     # MCP tool tests
+    ├── test_model_cache.py # Model cache tests
+    ├── test_job_queue.py  # Job queue tests
+    ├── test_worker.py     # Worker tests
+    └── test_subprocess_runner.py # Subprocess runner tests
 ```
 
 ## License
