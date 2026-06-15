@@ -75,8 +75,12 @@ class JobQueue:
                 conn.commit()
 
     def _now_iso(self) -> str:
-        """Return the current UTC time as an ISO-8601 string."""
-        return datetime.now(timezone.utc).isoformat()
+        """Return the current UTC time as a string compatible with SQLite's datetime().
+
+        Uses a space separator and no timezone suffix so that stored timestamps
+        compare correctly against SQLite's ``datetime('now')`` expressions.
+        """
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
         """Convert a sqlite3.Row into a plain dict with deserialized JSON."""

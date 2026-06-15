@@ -110,6 +110,14 @@ def run_job(job_id: str, db_path: str) -> None:
                     num_inference_steps=params.get("steps", 4),
                 )
             result = loaded_model.generate_image(**inference_kwargs)
+        elif command == "upscale_image":
+            queue.update_progress(job_id, {"phase": "upscaling"})
+            result = loaded_model.generate_image(
+                seed=seed,
+                image_path=params["image_path"],
+                resolution=params.get("resolution", 2160),
+                softness=params.get("softness", 0.5),
+            )
         else:
             raise ValueError(f"Unknown command: {command}")
 

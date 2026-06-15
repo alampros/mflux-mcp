@@ -15,7 +15,7 @@ import pytest
 
 from job_queue import JobQueue
 from mflux_cache import ModelCache
-from worker import WorkerManager
+from worker import WorkerManager, _clear_metal_cache, _setup_metal_cache_limit
 
 
 class _MockHelpers:
@@ -104,6 +104,28 @@ class _MockHelpers:
         timeout_s = params.pop("timeout_s", 300.0)
         return queue.submit(
             command="edit_image",
+            params=params,
+            output_path=output_path,
+            backend=backend,
+            timeout_s=timeout_s,
+        )
+
+    @staticmethod
+    def submit_upscale_job(queue, backend="thread", **overrides):
+        """Submit an upscale_image job with default params overridden."""
+        params = {
+            "image_path": "/tmp/input.png",
+            "model": "seedvr2-3b",
+            "resolution": 2160,
+            "softness": 0.5,
+            "seed": 42,
+            "quantize": 8,
+        }
+        params.update(overrides)
+        output_path = params.pop("output_path", "/tmp/test_output.png")
+        timeout_s = params.pop("timeout_s", 300.0)
+        return queue.submit(
+            command="upscale_image",
             params=params,
             output_path=output_path,
             backend=backend,
@@ -959,3 +981,141 @@ class TestConcurrentSubmissionRace:
             f"Expected exactly 3 process invocations for 3 jobs, "
             f"got {len(process_invocations)}."
         )
+
+
+class TestMetalMemoryManagement:
+    """Tests for MLX metal cache management between inference jobs."""
+
+    def test_setup_metal_cache_limit_sets_limit(self):
+        """_setup_metal_cache_limit calls mx.metal.set_cache_limit with
+        75% of the recommended max working set size."""
+        import mlx.core as mx
+
+        original_set = mx.metal.set_cache_limit
+        calls = []
+
+        def tracking_set(limit):
+            calls.append(limit)
+            return original_set(limit)
+
+        mock_device_info = MagicMock(
+            return_value={
+                "recommended_max_working_set_size": 16 * (1024**3),  # 16 GB
+            }
+        )
+
+        with patch.object(mx.metal, "set_cache_limit", side_effect=tracking_set):
+            with patch.object(mx, "device_info", mock_device_info, create=True):
+                _setup_metal_cache_limit()
+
+        assert len(calls) == 1
+        expected = int(16 * (1024**3) * 0.75)
+        assert calls[0] == expected, (
+            f"Expected cache limit of {expected} bytes (75% of 16 GB), got {calls[0]}"
+        )
+
+    def test_clear_metal_cache_calls_clear_and_gc(self):
+        """_clear_metal_cache calls mx.metal.clear_cache and gc.collect."""
+        import mlx.core as mx
+
+        with patch.object(mx.metal, "clear_cache") as mock_clear:
+            with patch("worker.gc.collect") as mock_gc:
+                _clear_metal_cache()
+
+        mock_clear.assert_called_once()
+        mock_gc.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_metal_cache_cleared_after_successful_job(self, tmp_path):
+        """The metal cache is cleared after a job completes successfully."""
+        mock_model = _MockHelpers.make_mock_model()
+
+        db_path = tmp_path / "test.db"
+        queue = JobQueue(db_path)
+        job = _MockHelpers.submit_generate_job(
+            queue, output_path=str(tmp_path / "out.png")
+        )
+
+        cache = ModelCache()
+        manager = WorkerManager(queue, cache)
+
+        clear_calls = []
+        original_run = manager._run_on_mlx_thread
+
+        async def tracking_run(fn, *args, **kwargs):
+            result = await original_run(fn, *args, **kwargs)
+            if fn is _clear_metal_cache:
+                clear_calls.append("cleared")
+            return result
+
+        with patch.object(ModelCache, "get_model", return_value=mock_model):
+            with patch.object(manager, "_run_on_mlx_thread", side_effect=tracking_run):
+                await manager.start()
+                try:
+                    for _ in range(50):
+                        updated = queue.get_job(job["job_id"])
+                        if updated["status"] in ("completed", "failed"):
+                            break
+                        await asyncio.sleep(0.1)
+                finally:
+                    await manager.stop()
+
+        assert len(clear_calls) >= 1, (
+            "Metal cache should be cleared after job completion"
+        )
+
+    @pytest.mark.asyncio
+    async def test_metal_cache_cleared_after_failed_job(self, tmp_path):
+        """The metal cache is cleared even when a job fails."""
+        db_path = tmp_path / "test.db"
+        queue = JobQueue(db_path)
+        job = _MockHelpers.submit_generate_job(
+            queue, output_path=str(tmp_path / "out.png")
+        )
+
+        cache = ModelCache()
+        manager = WorkerManager(queue, cache)
+
+        clear_calls = []
+        original_run = manager._run_on_mlx_thread
+
+        async def tracking_run(fn, *args, **kwargs):
+            if fn is _clear_metal_cache:
+                clear_calls.append("cleared")
+                return await original_run(fn, *args, **kwargs)
+            return await original_run(fn, *args, **kwargs)
+
+        with patch.object(ModelCache, "get_model", side_effect=RuntimeError("boom")):
+            with patch.object(manager, "_run_on_mlx_thread", side_effect=tracking_run):
+                await manager.start()
+                try:
+                    for _ in range(50):
+                        updated = queue.get_job(job["job_id"])
+                        if updated["status"] in ("completed", "failed"):
+                            break
+                        await asyncio.sleep(0.1)
+                finally:
+                    await manager.stop()
+
+        updated = queue.get_job(job["job_id"])
+        assert updated["status"] == "failed"
+        assert len(clear_calls) >= 1, (
+            "Metal cache should be cleared even after job failure"
+        )
+
+    @pytest.mark.asyncio
+    async def test_cache_limit_set_on_worker_start(self, tmp_path):
+        """WorkerManager.start() calls _setup_metal_cache_limit."""
+        db_path = tmp_path / "test.db"
+        queue = JobQueue(db_path)
+        cache = ModelCache()
+        manager = WorkerManager(queue, cache)
+
+        with patch("worker._setup_metal_cache_limit") as mock_setup:
+            await manager.start()
+            try:
+                pass
+            finally:
+                await manager.stop()
+
+        mock_setup.assert_called_once()

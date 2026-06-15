@@ -86,6 +86,10 @@ async def generate_image(
     30–90 seconds depending on model and parameters, so poll no more
     frequently than every 10 seconds to avoid unnecessary overhead.
 
+    IMPORTANT: You MUST sleep (e.g. use a shell `sleep 10` command) for at
+    least 10 seconds between each get_job() poll. Do NOT call get_job() in
+    a tight loop — the job needs time to run on the GPU.
+
     Args:
         prompt: Text description of the image to generate.
         output_path: File path to write the output image to.
@@ -174,6 +178,10 @@ async def edit_image(
     30–90 seconds depending on model and parameters, so poll no more
     frequently than every 10 seconds to avoid unnecessary overhead.
 
+    IMPORTANT: You MUST sleep (e.g. use a shell `sleep 10` command) for at
+    least 10 seconds between each get_job() poll. Do NOT call get_job() in
+    a tight loop — the job needs time to run on the GPU.
+
     Args:
         image_paths: List of input image file paths.
         prompt: Text description of the desired edit.
@@ -251,6 +259,103 @@ async def edit_image(
     }
 
 
+_VALID_UPSCALE_MODELS = {
+    name
+    for name, (class_key, _, _) in ModelCache._REGISTRY.items()
+    if class_key == "SeedVR2"
+}
+
+
+@mcp.tool()
+async def upscale_image(
+    image_path: str,
+    output_path: str,
+    model: str = "seedvr2-3b",
+    resolution: int = 2160,
+    softness: float = 0.5,
+    seed: int | None = None,
+    quantize: int | None = 8,
+    backend: str = "thread",
+    timeout: float = 300.0,
+) -> dict:
+    """Submit an image upscaling job to the async queue.
+
+    Returns a job descriptor immediately — the job runs in the background.
+    Use get_job() to poll for completion. Upscaling typically takes
+    30–90 seconds depending on model and resolution, so poll no more
+    frequently than every 10 seconds to avoid unnecessary overhead.
+
+    IMPORTANT: You MUST sleep (e.g. use a shell `sleep 10` command) for at
+    least 10 seconds between each get_job() poll. Do NOT call get_job() in
+    a tight loop — the job needs time to run on the GPU.
+
+    Args:
+        image_path: Path to the input image to upscale.
+        output_path: File path to write the upscaled image to.
+        model: Upscale model name (e.g. "seedvr2-3b", "seedvr2-7b").
+        resolution: Target shortest side in pixels (e.g. 2160 for ~4K).
+        softness: Pre-downsampling factor (0.0–1.0). Lower = sharper.
+        seed: Random seed for reproducibility. Auto-generated if not provided.
+        quantize: Quantization bit-width (4, 8, or None for full precision).
+        backend: Execution backend — "thread" or "subprocess".
+        timeout: Per-job timeout in seconds.
+
+    Returns:
+        A job descriptor dict with job_id, status, command, output_path, backend.
+    """
+    if _queue is None:
+        raise RuntimeError("Server not initialized — queue is not available.")
+
+    if model not in ModelCache._REGISTRY:
+        available = ", ".join(sorted(ModelCache._REGISTRY.keys()))
+        raise ValueError(f"Unknown model: '{model}'. Available models: {available}")
+
+    if model not in _VALID_UPSCALE_MODELS:
+        valid = ", ".join(sorted(_VALID_UPSCALE_MODELS))
+        raise ValueError(
+            f"Model '{model}' does not support upscaling. Valid upscale models: {valid}"
+        )
+
+    if quantize not in _VALID_QUANTIZE:
+        raise ValueError(f"Invalid quantize={quantize}. Must be one of: 4, 8, or None.")
+
+    if backend not in ("thread", "subprocess"):
+        raise ValueError(
+            f"Invalid backend='{backend}'. Must be 'thread' or 'subprocess'."
+        )
+
+    if seed is None:
+        seed = random.randint(0, 2**32 - 1)
+
+    _log(
+        f"upscale_image [queue-submit] model={model} resolution={resolution} "
+        f"softness={softness} seed={seed} quantize={quantize} backend={backend} "
+        f"image={image_path}"
+    )
+
+    job = _queue.submit(
+        command="upscale_image",
+        params={
+            "image_path": image_path,
+            "model": model,
+            "resolution": resolution,
+            "softness": softness,
+            "seed": seed,
+            "quantize": quantize,
+        },
+        output_path=output_path,
+        backend=backend,
+        timeout_s=timeout,
+    )
+    return {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "command": job["command"],
+        "output_path": job["output_path"],
+        "backend": job["backend"],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Queue management tools
 # ---------------------------------------------------------------------------
@@ -274,21 +379,33 @@ def list_jobs(status: str | None = None, limit: int = 50) -> list[dict]:
 
 
 @mcp.tool()
-def get_job(job_id: str) -> dict | None:
-    """Get full details of a single job.
+def get_job(job_id: str | list[str]) -> dict | list[dict | None] | None:
+    """Get full details of a single job, or multiple jobs at once.
 
-    Use this to check on a previously submitted generate_image or edit_image
-    job. Jobs typically take 30–90 seconds to complete. Do not poll more
+    Use this to check on previously submitted generate_image or edit_image
+    jobs. Jobs typically take 30–90 seconds to complete. Do not poll more
     frequently than every 10 seconds.
 
+    IMPORTANT: You MUST sleep (e.g. use a shell `sleep 10` command) for at
+    least 10 seconds between each call to this tool. Do NOT call get_job()
+    in a tight loop — the job needs time to run on the GPU.
+
+    When checking on multiple jobs, pass all job IDs in a single call
+    rather than calling get_job() once per job.
+
     Args:
-        job_id: The UUID job identifier.
+        job_id: A single UUID job identifier string, or a list of UUID
+            strings to fetch multiple jobs at once.
 
     Returns:
-        The job descriptor dict, or None if not found.
+        If job_id is a string: the job descriptor dict, or None if not found.
+        If job_id is a list: a list of job descriptor dicts (or None for
+            each job not found), in the same order as the input IDs.
     """
     if _queue is None:
         raise RuntimeError("Server not initialized — queue is not available.")
+    if isinstance(job_id, list):
+        return [_queue.get_job(jid) for jid in job_id]
     return _queue.get_job(job_id)
 
 
@@ -340,6 +457,13 @@ _FAMILY_MAP: dict[str, str] = {
     "SeedVR2": "SeedVR2",
 }
 
+# Maps capability → MCP tool name, so callers know which tool to use.
+_TOOL_MAP: dict[str, str] = {
+    "txt2img": "generate_image",
+    "edit": "edit_image",
+    "upscale": "upscale_image",
+}
+
 
 @mcp.tool()
 def list_models() -> list[dict]:
@@ -351,9 +475,11 @@ def list_models() -> list[dict]:
 
     Returns:
         A list of dicts, one per model, each containing:
-            - name: Model identifier to pass to generate_image / edit_image.
+            - name: Model identifier to pass to the tool named in ``tool``.
             - family: Model family (e.g. "FLUX.1", "FLUX.2", "FIBO").
             - capability: One of "txt2img", "edit", or "upscale".
+            - tool: The MCP tool to use with this model (e.g.
+              "generate_image", "edit_image", "upscale_image").
             - supports_lora: Whether the model accepts LoRA adapters.
             - quantize_options: Valid quantize values (list of ints or None).
             - is_downloaded: Whether the model weights are locally cached.
@@ -366,11 +492,13 @@ def list_models() -> list[dict]:
     ) in ModelCache._REGISTRY.items():
         repo_id = _REPO_MAP.get(config_factory_name)
         downloaded = is_model_cached(repo_id) if repo_id else False
+        capability = _CAPABILITY_MAP[class_key]
         models.append(
             {
                 "name": name,
                 "family": _FAMILY_MAP[class_key],
-                "capability": _CAPABILITY_MAP[class_key],
+                "capability": capability,
+                "tool": _TOOL_MAP[capability],
                 "supports_lora": supports_lora,
                 "quantize_options": [4, 8, None],
                 "is_downloaded": downloaded,

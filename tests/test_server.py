@@ -25,6 +25,7 @@ from server import (
     mcp,
     generate_image,
     edit_image,
+    upscale_image,
     list_jobs,
     get_job,
     cancel_job,
@@ -59,6 +60,12 @@ class TestServerSetup:
         tools = await mcp.list_tools()
         tool_names = [t.name for t in tools]
         assert "edit_image" in tool_names
+
+    @pytest.mark.asyncio
+    async def test_upscale_image_tool_registered(self):
+        tools = await mcp.list_tools()
+        tool_names = [t.name for t in tools]
+        assert "upscale_image" in tool_names
 
     @pytest.mark.asyncio
     async def test_list_jobs_tool_registered(self):
@@ -327,6 +334,131 @@ class TestEditImageTool:
 
 
 # ---------------------------------------------------------------------------
+# upscale_image tool
+# ---------------------------------------------------------------------------
+
+
+class TestUpscaleImageTool:
+    """Tests for the upscale_image MCP tool."""
+
+    @pytest.mark.asyncio
+    async def test_submit_returns_job_descriptor(self, mock_queue):
+        mock_queue.submit.return_value = {
+            "job_id": "u1",
+            "status": "queued",
+            "command": "upscale_image",
+            "output_path": "/tmp/up.png",
+            "backend": "thread",
+        }
+        with patch.object(server_module, "_queue", mock_queue):
+            result = await upscale_image(
+                image_path="input.png",
+                output_path="/tmp/up.png",
+            )
+
+        assert result["job_id"] == "u1"
+        assert result["status"] == "queued"
+        assert result["command"] == "upscale_image"
+
+    @pytest.mark.asyncio
+    async def test_default_params(self, mock_queue):
+        mock_queue.submit.return_value = {
+            "job_id": "u2",
+            "status": "queued",
+            "command": "upscale_image",
+            "output_path": "/tmp/up.png",
+            "backend": "thread",
+        }
+        with patch.object(server_module, "_queue", mock_queue):
+            await upscale_image(
+                image_path="input.png",
+                output_path="/tmp/up.png",
+            )
+
+        call_kwargs = mock_queue.submit.call_args[1]
+        params = call_kwargs["params"]
+        assert params["model"] == "seedvr2-3b"
+        assert params["resolution"] == 2160
+        assert params["softness"] == 0.5
+        assert params["quantize"] == 8
+        assert call_kwargs["command"] == "upscale_image"
+
+    @pytest.mark.asyncio
+    async def test_custom_params(self, mock_queue):
+        mock_queue.submit.return_value = {
+            "job_id": "u3",
+            "status": "queued",
+            "command": "upscale_image",
+            "output_path": "/tmp/up.png",
+            "backend": "thread",
+        }
+        with patch.object(server_module, "_queue", mock_queue):
+            await upscale_image(
+                image_path="input.png",
+                output_path="/tmp/up.png",
+                model="seedvr2-7b",
+                resolution=4320,
+                softness=0.3,
+                seed=42,
+                quantize=4,
+            )
+
+        params = mock_queue.submit.call_args[1]["params"]
+        assert params["model"] == "seedvr2-7b"
+        assert params["resolution"] == 4320
+        assert params["softness"] == 0.3
+        assert params["seed"] == 42
+        assert params["quantize"] == 4
+
+    @pytest.mark.asyncio
+    async def test_invalid_model(self, mock_queue):
+        with patch.object(server_module, "_queue", mock_queue):
+            with pytest.raises(ValueError, match="Unknown model"):
+                await upscale_image(
+                    image_path="input.png",
+                    output_path="/tmp/up.png",
+                    model="not-a-model",
+                )
+
+    @pytest.mark.asyncio
+    async def test_non_upscale_model_rejected(self, mock_queue):
+        with patch.object(server_module, "_queue", mock_queue):
+            with pytest.raises(ValueError, match="does not support upscaling"):
+                await upscale_image(
+                    image_path="input.png",
+                    output_path="/tmp/up.png",
+                    model="flux2-klein-4b",
+                )
+
+    @pytest.mark.asyncio
+    async def test_queue_not_initialized(self):
+        with patch.object(server_module, "_queue", None):
+            with pytest.raises(RuntimeError, match="queue is not available"):
+                await upscale_image(
+                    image_path="input.png",
+                    output_path="/tmp/up.png",
+                )
+
+    @pytest.mark.asyncio
+    async def test_seed_auto_generation(self, mock_queue):
+        mock_queue.submit.return_value = {
+            "job_id": "u4",
+            "status": "queued",
+            "command": "upscale_image",
+            "output_path": "/tmp/up.png",
+            "backend": "thread",
+        }
+        with patch.object(server_module, "_queue", mock_queue):
+            await upscale_image(
+                image_path="input.png",
+                output_path="/tmp/up.png",
+            )
+
+        params = mock_queue.submit.call_args[1]["params"]
+        assert isinstance(params["seed"], int)
+
+
+# ---------------------------------------------------------------------------
 # list_jobs tool
 # ---------------------------------------------------------------------------
 
@@ -389,10 +521,43 @@ class TestGetJobTool:
 
         assert result is None
 
+    def test_get_multiple_jobs(self, mock_queue):
+        mock_queue.get_job.side_effect = [
+            {"job_id": "a", "status": "completed"},
+            {"job_id": "b", "status": "running"},
+            None,
+        ]
+        with patch.object(server_module, "_queue", mock_queue):
+            result = get_job(["a", "b", "missing"])
+
+        assert isinstance(result, list)
+        assert len(result) == 3
+        assert result[0]["job_id"] == "a"
+        assert result[1]["job_id"] == "b"
+        assert result[2] is None
+
+    def test_get_multiple_preserves_order(self, mock_queue):
+        mock_queue.get_job.side_effect = lambda jid: {"job_id": jid, "status": "queued"}
+        with patch.object(server_module, "_queue", mock_queue):
+            result = get_job(["z", "a", "m"])
+
+        assert [r["job_id"] for r in result] == ["z", "a", "m"]
+
+    def test_get_empty_list_returns_empty(self, mock_queue):
+        with patch.object(server_module, "_queue", mock_queue):
+            result = get_job([])
+
+        assert result == []
+
     def test_queue_not_initialized(self):
         with patch.object(server_module, "_queue", None):
             with pytest.raises(RuntimeError, match="queue is not available"):
                 get_job("abc")
+
+    def test_queue_not_initialized_with_list(self):
+        with patch.object(server_module, "_queue", None):
+            with pytest.raises(RuntimeError, match="queue is not available"):
+                get_job(["abc", "def"])
 
 
 # ---------------------------------------------------------------------------
@@ -568,6 +733,7 @@ class TestListModelsTool:
             "name",
             "family",
             "capability",
+            "tool",
             "supports_lora",
             "quantize_options",
             "is_downloaded",
@@ -588,6 +754,19 @@ class TestListModelsTool:
         result = list_models()
         capabilities = {entry["capability"] for entry in result}
         assert capabilities == {"txt2img", "edit", "upscale"}
+
+    def test_tool_field_matches_capability(self):
+        expected_map = {
+            "txt2img": "generate_image",
+            "edit": "edit_image",
+            "upscale": "upscale_image",
+        }
+        result = list_models()
+        for entry in result:
+            assert entry["tool"] == expected_map[entry["capability"]], (
+                f"Model {entry['name']} has capability={entry['capability']} "
+                f"but tool={entry['tool']}, expected {expected_map[entry['capability']]}"
+            )
 
     def test_all_families_represented(self):
         result = list_models()

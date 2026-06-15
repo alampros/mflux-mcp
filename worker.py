@@ -11,6 +11,7 @@ Only one job runs at a time across both backends (GPU exclusivity).
 import asyncio
 import concurrent.futures
 import functools
+import gc
 import io
 import os
 import random
@@ -26,6 +27,56 @@ from mflux_cache import ModelCache
 def _log(msg: str) -> None:
     """Write a log line to stderr."""
     print(f"[mflux-worker] {msg}", file=sys.stderr, flush=True)
+
+
+def _setup_metal_cache_limit() -> None:
+    """Set the MLX metal cache limit to a fraction of available GPU memory.
+
+    This prevents the metal allocator from caching unlimited intermediate
+    tensors between inference runs.  Without a cap, sequential generations
+    accumulate cached metal buffers until the system runs out of unified
+    memory.
+    """
+    try:
+        import mlx.core as mx
+
+        _device_info = getattr(mx, "device_info", None) or getattr(
+            mx.metal, "device_info", None
+        )
+        info = _device_info() if _device_info else {}
+        rec_max = info.get(
+            "recommended_max_working_set_size",
+            info.get("max_recommended_working_set_size", 0),
+        )
+        if rec_max > 0:
+            # Use 75% of the recommended max as the cache limit
+            limit = int(rec_max * 0.75)
+            mx.metal.set_cache_limit(limit)
+            _log(
+                f"Metal cache limit set to {limit / (1024**3):.1f} GB "
+                f"(75% of {rec_max / (1024**3):.1f} GB recommended max)"
+            )
+        else:
+            _log("Could not determine GPU memory size; metal cache limit not set")
+    except Exception as exc:
+        _log(f"Failed to set metal cache limit: {exc}")
+
+
+def _clear_metal_cache() -> None:
+    """Clear the MLX metal cache and run garbage collection.
+
+    Called after each job completes to free cached GPU allocations before
+    the next job begins.  Without this, intermediate tensors from previous
+    inference runs stay resident in the metal cache, and memory usage
+    grows monotonically across jobs.
+    """
+    try:
+        import mlx.core as mx
+
+        mx.metal.clear_cache()
+    except Exception:
+        pass  # MLX not available or clear_cache failed — not fatal
+    gc.collect()
 
 
 class WorkerManager:
@@ -62,6 +113,7 @@ class WorkerManager:
 
     async def start(self) -> None:
         """Start background worker tasks."""
+        _setup_metal_cache_limit()
         self._running = True
         self._tasks = [
             asyncio.create_task(self._thread_worker_loop(), name="thread-worker"),
@@ -148,13 +200,13 @@ class WorkerManager:
         """Background loop that polls for and processes thread backend jobs."""
         while self._running:
             try:
-                job = self._queue.claim_next("thread")
+                job = None
+                async with self._gpu_lock:
+                    job = self._queue.claim_next("thread")
+                    if job is not None:
+                        await self._process_thread_job(job)
                 if job is None:
                     await asyncio.sleep(1)
-                    continue
-
-                async with self._gpu_lock:
-                    await self._process_thread_job(job)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -165,13 +217,13 @@ class WorkerManager:
         """Background loop that polls for and dispatches subprocess backend jobs."""
         while self._running:
             try:
-                job = self._queue.claim_next("subprocess")
+                job = None
+                async with self._gpu_lock:
+                    job = self._queue.claim_next("subprocess")
+                    if job is not None:
+                        await self._process_subprocess_job(job)
                 if job is None:
                     await asyncio.sleep(1)
-                    continue
-
-                async with self._gpu_lock:
-                    await self._process_subprocess_job(job)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -298,6 +350,15 @@ class WorkerManager:
                 result = await self._run_on_mlx_thread(
                     loaded_model.generate_image, **inference_kwargs
                 )
+            elif command == "upscale_image":
+                self._queue.update_progress(job_id, {"phase": "upscaling"})
+                result = await self._run_on_mlx_thread(
+                    loaded_model.generate_image,
+                    seed=seed,
+                    image_path=params["image_path"],
+                    resolution=params.get("resolution", 2160),
+                    softness=params.get("softness", 0.5),
+                )
             else:
                 raise ValueError(f"Unknown command: {command}")
 
@@ -329,6 +390,11 @@ class WorkerManager:
                 error=str(e),
                 completed_at=self._now_iso(),
             )
+        finally:
+            # Free MLX metal cache and Python references between jobs.
+            # Without this, intermediate tensors from inference accumulate
+            # in the metal cache across sequential jobs until OOM.
+            await self._run_on_mlx_thread(_clear_metal_cache)
 
     async def _process_subprocess_job(self, job: dict[str, Any]) -> None:
         """Spawn a subprocess to process a single subprocess backend job."""

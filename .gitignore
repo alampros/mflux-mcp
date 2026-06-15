@@ -11,6 +11,11 @@ __pycache__/
 
 # uv
 
+# Job queue database (auto-created at runtime)
+jobs.db
+jobs.db-shm
+jobs.db-wal
+
 # Harness runtime
 .harness/harness.db
 .harness/current.md
